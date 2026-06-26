@@ -288,6 +288,12 @@ class SongChart:
             warnings.extend(provenance_warnings(records, claim=f"chord.{chord}"))
         for field_name, records in self.analysis_provenance.items():
             warnings.extend(provenance_warnings(records, claim=f"analysis.{field_name}"))
+        for note_key, records in self.performance_note_provenance.items():
+            warnings.extend(
+                provenance_warnings(records, claim=f"performance_note.{note_key}")
+            )
+        for note_key, records in self.recording_note_provenance.items():
+            warnings.extend(provenance_warnings(records, claim=f"recording_note.{note_key}"))
         for index, section in enumerate(self.sections):
             warnings.extend(provenance_warnings(section.provenance, claim=f"section.{index}"))
             for measure_index, measure in enumerate(section.bars):

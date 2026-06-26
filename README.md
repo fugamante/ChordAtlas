@@ -49,6 +49,12 @@ Render JSON, preserving complete provenance data:
 chordchart render examples/open-string-progression.yaml --format json
 ```
 
+Validate a chart and surface provenance warnings:
+
+```bash
+chordchart validate examples/open-string-progression.yaml
+```
+
 Show provenance in rendered Markdown or text:
 
 ```bash

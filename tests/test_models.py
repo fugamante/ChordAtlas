@@ -70,3 +70,22 @@ def test_version_history_rejects_non_sequence_changes() -> None:
                 "version_history": [{"version": "1.0", "changes": None}],
             }
         )
+
+
+def test_provenance_warnings_include_note_provenance_maps() -> None:
+    chart = SongChart.from_mapping(
+        {
+            "title": "Test",
+            "performance_note_provenance": {
+                "0": {"source_type": "unknown", "claim_origin": "unknown"}
+            },
+            "recording_note_provenance": {
+                "amp": {"source_type": "unknown", "claim_origin": "unknown"}
+            },
+        }
+    )
+
+    assert chart.provenance_warnings() == (
+        "performance_note.0 has unknown provenance",
+        "recording_note.amp has unknown provenance",
+    )

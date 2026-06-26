@@ -16,6 +16,8 @@ def main(argv: list[str] | None = None) -> int:
         return _new_chart(args.path, force=args.force)
     if args.command == "render":
         return _render_chart(args.path, output_format=args.format, provenance_mode=args.provenance)
+    if args.command == "validate":
+        return _validate_chart(args.path)
 
     parser.print_help()
     return 1
@@ -38,6 +40,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default="minimal",
         help="How much provenance to show in Markdown and text output.",
     )
+
+    validate_parser = subcommands.add_parser(
+        "validate",
+        help="Load a song YAML file and report schema or provenance warnings.",
+    )
+    validate_parser.add_argument("path", type=Path)
 
     return parser
 
@@ -63,6 +71,24 @@ def _render_chart(path: Path, *, output_format: str, provenance_mode: str) -> in
     else:
         print(f"Unsupported format: {output_format}", file=sys.stderr)
         return 2
+    return 0
+
+
+def _validate_chart(path: Path) -> int:
+    try:
+        chart = load_song_chart(path)
+    except (OSError, ValueError) as error:
+        print(f"Invalid chart: {error}", file=sys.stderr)
+        return 1
+
+    warnings = chart.provenance_warnings()
+    if not warnings:
+        print(f"Valid chart: {path}", file=sys.stderr)
+        return 0
+
+    print(f"Valid chart with {len(warnings)} provenance warning(s): {path}", file=sys.stderr)
+    for warning in warnings:
+        print(f"- {warning}", file=sys.stderr)
     return 0
 
 

@@ -43,6 +43,8 @@ The Foundation Gate is complete when ChordAtlas can reliably support:
 - Markdown and plain-text renderers suitable for review and publication.
 - Automatic chord reference generation from chords used in the chart.
 - Provenance warnings that expose uncertainty without rejecting incomplete work.
+- A validation command that loads a chart, rejects malformed input, and reports
+  provenance warnings.
 - Focused tests for parsing, rendering, chord lookup, provenance, and CLI
   behavior.
 - Architecture documentation that explains domain boundaries and extension
