@@ -40,11 +40,11 @@ def test_chart_serialization_preserves_complete_provenance() -> None:
             "chord_provenance": {
                 "Cadd9": {
                     "source_type": "audio",
-                    "source_name": "YouTube recording",
+                    "source_name": "Example recording",
                     "source_url": "https://youtube.com/example",
                     "timestamp_range": "00:13-00:18",
                     "method": "human-ear transcription",
-                    "contributor": "Moises",
+                    "contributor": "Example Contributor",
                     "confidence": "medium",
                     "verification_status": "unverified",
                     "notes": "Chord sounds like Cadd9, but Cmaj7 is possible.",
@@ -56,7 +56,7 @@ def test_chart_serialization_preserves_complete_provenance() -> None:
 
     payload = json.loads(song_chart_to_json(chart))
 
-    assert payload["chord_provenance"]["Cadd9"][0]["source_name"] == "YouTube recording"
+    assert payload["chord_provenance"]["Cadd9"][0]["source_name"] == "Example recording"
     assert payload["chord_provenance"]["Cadd9"][0]["confidence"] == "medium"
     assert payload["chord_provenance"]["Cadd9"][0]["notes"].startswith("Chord sounds")
 

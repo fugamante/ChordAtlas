@@ -38,6 +38,18 @@ provenance:
   confidence: medium
   verification_status: unverified
   claim_origin: user_entered
+chord_provenance:
+  Cadd9:
+    source_type: audio
+    source_name: Example recording
+    source_url: https://youtube.com/example
+    timestamp_range: 00:13-00:18
+    method: human-ear transcription
+    contributor: Example Contributor
+    confidence: medium
+    verification_status: unverified
+    claim_origin: inferred
+    notes: Chord sounds like Cadd9, but Cmaj7 is possible.
 version_history:
   - version: "1.0"
     changes:
@@ -80,5 +92,6 @@ analysis:
     - "4add9"
 performance_notes:
   - Use ringing open-string voicings when possible.
+  - Prefer playable guitar shapes over piano-style harmonic spellings.
   - Mark uncertain chords clearly.
 """

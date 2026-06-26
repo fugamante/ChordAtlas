@@ -1,5 +1,11 @@
+from pathlib import Path
+
+from chordatlas.io import load_song_chart
 from chordatlas.models import SongChart
 from chordatlas.render import render_markdown, render_text
+
+ROOT = Path(__file__).resolve().parents[1]
+SNAPSHOTS = Path(__file__).resolve().parent / "snapshots"
 
 
 def _chart() -> SongChart:
@@ -54,3 +60,19 @@ def test_renderers_omit_version_history_when_absent() -> None:
 
     assert "Version History" not in render_markdown(chart)
     assert "VERSION HISTORY" not in render_text(chart)
+
+
+def test_example_markdown_matches_golden_snapshot() -> None:
+    chart = load_song_chart(ROOT / "examples" / "open-string-progression.yaml")
+
+    assert render_markdown(chart) == (SNAPSHOTS / "open-string-progression.md").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_example_text_matches_golden_snapshot() -> None:
+    chart = load_song_chart(ROOT / "examples" / "open-string-progression.yaml")
+
+    assert render_text(chart) == (SNAPSHOTS / "open-string-progression.txt").read_text(
+        encoding="utf-8"
+    )

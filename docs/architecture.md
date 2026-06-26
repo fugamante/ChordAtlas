@@ -96,6 +96,17 @@ Markdown and plain-text rendering support three provenance modes:
 
 JSON export always preserves complete provenance data.
 
+## Serialization Contract
+
+Hand-authored YAML is an input format optimized for readability and compatibility
+with simple charts. The canonical machine-readable contract is the normalized
+JSON export produced by `chordchart render --format json`.
+
+The Layer 0 schema lives at `schemas/song-chart.schema.json`. It defines the
+current `SongChart` export shape, including provenance records, version history,
+sections, and both simple array measures and provenance-aware measure objects.
+Schema changes are contract changes and must be covered by tests.
+
 ## Design Constraint
 
 Do not bury uncertainty. ChordAtlas should make strong charts possible, but

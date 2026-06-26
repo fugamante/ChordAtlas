@@ -12,7 +12,8 @@ It intentionally avoids storing or reproducing copyrighted lyrics. Charts should
 - Automatic chord reference generation for only the chords used in a chart.
 - Structured version history with Markdown and plain-text rendering.
 - Markdown, plain-text, and JSON export.
-- `chordchart` CLI with `new` and `render` commands.
+- JSON Schema contract for the normalized `SongChart` export.
+- `chordchart` CLI with `new`, `render`, and `validate` commands.
 - Example YAML chart and focused tests.
 
 ## Install For Development
@@ -49,6 +50,9 @@ Render JSON, preserving complete provenance data:
 chordchart render examples/open-string-progression.yaml --format json
 ```
 
+The canonical machine-readable export contract is
+[schemas/song-chart.schema.json](schemas/song-chart.schema.json).
+
 Validate a chart and surface provenance warnings:
 
 ```bash
@@ -83,11 +87,11 @@ provenance:
 chord_provenance:
   Cadd9:
     source_type: audio
-    source_name: YouTube recording
+    source_name: Example recording
     source_url: https://youtube.com/example
     timestamp_range: 00:13-00:18
     method: human-ear transcription
-    contributor: Moises
+    contributor: Example Contributor
     confidence: medium
     verification_status: unverified
     claim_origin: inferred
@@ -177,6 +181,9 @@ This keeps the first version small while leaving room for later ingestion, detec
 ```bash
 pytest
 ```
+
+Schema contract tests use `jsonschema` from the development dependency set and
+validate exported JSON, not hand-authored YAML.
 
 ## Roadmap
 

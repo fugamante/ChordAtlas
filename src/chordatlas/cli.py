@@ -61,7 +61,12 @@ def _new_chart(path: Path, *, force: bool) -> int:
 
 
 def _render_chart(path: Path, *, output_format: str, provenance_mode: str) -> int:
-    chart = load_song_chart(path)
+    try:
+        chart = load_song_chart(path)
+    except (OSError, ValueError) as error:
+        print(f"Invalid chart: {error}", file=sys.stderr)
+        return 1
+
     if output_format == "md":
         print(render_markdown(chart, provenance_mode=provenance_mode), end="")
     elif output_format == "txt":

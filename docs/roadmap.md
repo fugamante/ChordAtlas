@@ -40,6 +40,7 @@ The Foundation Gate is complete when ChordAtlas can reliably support:
   provenance.
 - YAML as the primary human-authored input format.
 - JSON export as the machine-readable preservation format.
+- A JSON Schema that documents and tests the normalized JSON export contract.
 - Markdown and plain-text renderers suitable for review and publication.
 - Automatic chord reference generation from chords used in the chart.
 - Provenance warnings that expose uncertainty without rejecting incomplete work.

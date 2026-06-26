@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chordatlas.org/schemas/song-chart.schema.json",
+  "title": "ChordAtlas SongChart",
+  "description": "Canonical Layer 0 JSON export contract for a ChordAtlas song chart.",
+  "type": "object",
+  "required": ["title", "tuning", "capo", "version", "sections"],
+  "additionalProperties": false,
+  "properties": {
+    "title": { "type": "string", "minLength": 1 },
+    "artist": { "type": "string" },
+    "key": { "type": "string" },
+    "tuning": { "type": "string" },
+    "capo": { "type": "string" },
+    "version": { "type": "string" },
+    "confidence": { "$ref": "#/$defs/confidence" },
+    "source": { "type": "string" },
+    "voicing_notes": { "$ref": "#/$defs/stringList" },
+    "version_history": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/versionEntry" }
+    },
+    "analysis": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "roman": { "$ref": "#/$defs/scalarList" },
+        "nashville": { "$ref": "#/$defs/scalarList" }
+      }
+    },
+    "performance_notes": { "$ref": "#/$defs/stringList" },
+    "recording_notes": { "$ref": "#/$defs/stringList" },
+    "sections": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/section" }
+    },
+    "provenance": { "$ref": "#/$defs/provenanceList" },
+    "metadata_provenance": { "$ref": "#/$defs/provenanceMap" },
+    "chord_provenance": { "$ref": "#/$defs/provenanceMap" },
+    "analysis_provenance": { "$ref": "#/$defs/provenanceMap" },
+    "performance_note_provenance": { "$ref": "#/$defs/provenanceMap" },
+    "recording_note_provenance": { "$ref": "#/$defs/provenanceMap" }
+  },
+  "$defs": {
+    "confidence": {
+      "type": "string",
+      "enum": ["low", "medium", "high"]
+    },
+    "sourceType": {
+      "type": "string",
+      "enum": [
+        "audio",
+        "video",
+        "stem",
+        "score",
+        "tab",
+        "liner_notes",
+        "interview",
+        "software",
+        "contributor",
+        "reference",
+        "unknown"
+      ]
+    },
+    "claimOrigin": {
+      "type": "string",
+      "enum": [
+        "observed",
+        "computed",
+        "inferred",
+        "verified",
+        "user_entered",
+        "unknown"
+      ]
+    },
+    "verificationStatus": {
+      "type": "string",
+      "enum": ["unverified", "verified", "disputed", "unknown"]
+    },
+    "timestampRange": {
+      "type": "string",
+      "pattern": "^\\d{1,2}:\\d{2}(:\\d{2})?\\s*[-–]\\s*\\d{1,2}:\\d{2}(:\\d{2})?$"
+    },
+    "stringList": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "scalarList": {
+      "type": "array",
+      "items": {
+        "type": ["string", "number", "integer", "boolean"]
+      }
+    },
+    "provenanceMap": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/provenanceList" }
+    },
+    "provenanceList": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/provenanceRecord" }
+    },
+    "provenanceRecord": {
+      "type": "object",
+      "required": ["source_type", "verification_status", "claim_origin"],
+      "additionalProperties": false,
+      "properties": {
+        "source_type": { "$ref": "#/$defs/sourceType" },
+        "source_name": { "type": "string" },
+        "source_url": { "type": "string" },
+        "timestamp_range": { "$ref": "#/$defs/timestampRange" },
+        "method": { "type": "string" },
+        "contributor": { "type": "string" },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "created_at": { "type": "string" },
+        "notes": { "type": "string" },
+        "verification_status": { "$ref": "#/$defs/verificationStatus" },
+        "evidence_refs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/evidenceReference" }
+        },
+        "claim_origin": { "$ref": "#/$defs/claimOrigin" }
+      }
+    },
+    "evidenceReference": {
+      "type": "object",
+      "required": ["ref_id"],
+      "additionalProperties": false,
+      "properties": {
+        "ref_id": { "type": "string", "minLength": 1 },
+        "source_name": { "type": "string" },
+        "source_url": { "type": "string" },
+        "timestamp_range": { "$ref": "#/$defs/timestampRange" },
+        "notes": { "type": "string" }
+      }
+    },
+    "section": {
+      "type": "object",
+      "required": ["name", "bars"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "bars": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/measure" }
+        },
+        "repeat": { "type": "string" },
+        "notes": { "$ref": "#/$defs/stringList" },
+        "provenance": { "$ref": "#/$defs/provenanceList" }
+      }
+    },
+    "measure": {
+      "oneOf": [
+        {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        {
+          "type": "object",
+          "required": ["chords"],
+          "additionalProperties": false,
+          "properties": {
+            "chords": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "timestamp": { "type": "string" },
+            "provenance": { "$ref": "#/$defs/provenanceList" }
+          }
+        }
+      ]
+    },
+    "versionEntry": {
+      "type": "object",
+      "required": ["version", "changes"],
+      "additionalProperties": false,
+      "properties": {
+        "version": { "type": "string" },
+        "changes": { "$ref": "#/$defs/stringList" },
+        "provenance": { "$ref": "#/$defs/provenanceList" }
+      }
+    }
+  }
+}
