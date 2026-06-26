@@ -1,0 +1,51 @@
+title: Example Open-String Progression
+artist: ChordAtlas
+key: G
+tuning: Standard
+capo: None
+version: "2.0"
+confidence: Medium
+version_history:
+  - version: "1.0"
+    changes:
+      - Initial transcription.
+  - version: "1.1"
+    changes:
+      - Corrected Verse 2.
+      - Changed Cmaj7 to Cadd9.
+  - version: "1.2"
+    changes:
+      - Added alternate capo version.
+      - Improved Guitar 2 voicings.
+  - version: "2.0"
+    changes:
+      - Verified against isolated stems.
+sections:
+  - name: Intro
+    bars:
+      - [G]
+      - [D/F#]
+      - [Em7]
+      - [Cadd9]
+    repeat: "x2"
+  - name: Verse
+    bars:
+      - [G]
+      - [D/F#]
+      - [Em7]
+      - [Cadd9]
+analysis:
+  roman:
+    - "I"
+    - "V6"
+    - "vi7"
+    - "IVadd9"
+  nashville:
+    - "1"
+    - "5/7"
+    - "6m7"
+    - "4add9"
+performance_notes:
+  - Use ringing open-string voicings when possible.
+  - Prefer playable guitar shapes over piano-style harmonic spellings.
+  - Mark uncertain chords clearly.
