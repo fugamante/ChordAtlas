@@ -88,7 +88,7 @@ chord_provenance:
   Cadd9:
     source_type: audio
     source_name: Example recording
-    source_url: https://youtube.com/example
+    source_url: https://example.invalid/recording
     timestamp_range: 00:13-00:18
     method: human-ear transcription
     contributor: Example Contributor
@@ -140,7 +140,7 @@ ChordAtlas distinguishes claim origins:
 
 - `observed`: directly audible or visible from a source.
 - `computed`: derived by software analysis.
-- `inferred`: best estimate by a human or AI. Must include confidence.
+- `inferred`: best estimate by a human or automated process. Must include confidence.
 - `verified`: confirmed against a trusted reference.
 - `user_entered`: manually supplied by the chart author.
 - `unknown`: present in the chart, but origin is not yet documented. Allowed, but flagged.

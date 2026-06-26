@@ -41,7 +41,7 @@ def test_chart_serialization_preserves_complete_provenance() -> None:
                 "Cadd9": {
                     "source_type": "audio",
                     "source_name": "Example recording",
-                    "source_url": "https://youtube.com/example",
+                    "source_url": "https://example.invalid/recording",
                     "timestamp_range": "00:13-00:18",
                     "method": "human-ear transcription",
                     "contributor": "Example Contributor",

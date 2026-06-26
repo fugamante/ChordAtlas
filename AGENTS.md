@@ -293,7 +293,7 @@ Design the architecture so these can be added later without major rewrites:
 - Chord detection
 - Key detection
 - Tempo detection
-- AI-assisted transcription
+- Assisted transcription
 - Practice mode
 - Interactive playback
 - Capo optimizer

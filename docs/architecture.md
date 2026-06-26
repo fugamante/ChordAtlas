@@ -16,7 +16,7 @@ ChordAtlas separates a claim's origin from its verification status:
 
 - `observed`: directly audible or visible from a source.
 - `computed`: derived by software analysis.
-- `inferred`: best estimate by a human or AI.
+- `inferred`: best estimate by a human or automated process.
 - `verified`: entered because a trusted reference confirms it.
 - `user_entered`: manually supplied by the chart author.
 - `unknown`: present in the chart, but origin is not yet documented.
