@@ -1,0 +1,366 @@
+{
+  "analysis": {
+    "nashville": [
+      "1",
+      "5/7",
+      "6m7",
+      "4add9"
+    ],
+    "roman": [
+      "I",
+      "V6",
+      "vi7",
+      "IVadd9"
+    ]
+  },
+  "artist": "ChordAtlas",
+  "capo": "None",
+  "chord_provenance": {
+    "Cadd9": [
+      {
+        "claim_origin": "inferred",
+        "confidence": "medium",
+        "contributor": "Example Contributor",
+        "method": "human-ear transcription",
+        "notes": "Chord sounds like Cadd9, but Cmaj7 is possible.",
+        "source_name": "Example recording",
+        "source_type": "audio",
+        "source_url": "https://example.invalid/recording",
+        "timestamp_range": "00:13-00:18",
+        "verification_status": "unverified"
+      }
+    ]
+  },
+  "confidence": "medium",
+  "key": "G",
+  "performance_notes": [
+    "Use ringing open-string voicings when possible.",
+    "Prefer playable guitar shapes over piano-style harmonic spellings.",
+    "Mark uncertain chords clearly."
+  ],
+  "provenance": [
+    {
+      "claim_origin": "user_entered",
+      "confidence": "medium",
+      "contributor": "ChordAtlas Maintainers",
+      "method": "user-entered",
+      "source_name": "Starter chart",
+      "source_type": "contributor",
+      "verification_status": "unverified"
+    }
+  ],
+  "recordings": [
+    {
+      "id": "studio",
+      "source_url": "https://example.invalid/recording",
+      "title": "Example recording",
+      "version_label": "Studio reference"
+    },
+    {
+      "id": "stems",
+      "title": "Example isolated stems",
+      "version_label": "Stem reference"
+    },
+    {
+      "id": "live",
+      "source_url": "https://example.invalid/live",
+      "title": "Example live performance",
+      "version_label": "Live reference"
+    },
+    {
+      "id": "demo",
+      "title": "Example acoustic demo",
+      "version_label": "Demo reference"
+    },
+    {
+      "id": "remaster",
+      "source_url": "https://example.invalid/remaster",
+      "title": "Example remaster",
+      "version_label": "Remaster reference"
+    }
+  ],
+  "schema_version": "1.0.0",
+  "sections": [
+    {
+      "bars": [
+        [
+          "G"
+        ],
+        [
+          "D/F#"
+        ],
+        [
+          "Em7"
+        ],
+        [
+          "Cadd9"
+        ]
+      ],
+      "name": "Intro",
+      "repeat": "x2"
+    },
+    {
+      "bars": [
+        [
+          "G"
+        ],
+        [
+          "D/F#"
+        ],
+        [
+          "Em7"
+        ],
+        [
+          "Cadd9"
+        ]
+      ],
+      "name": "Verse"
+    }
+  ],
+  "structured_recording_notes": [
+    {
+      "category": "instrumentation",
+      "name": "Guitar 1",
+      "notes": [
+        {
+          "claim_origin": "observed",
+          "confidence": "high",
+          "text": "Left channel"
+        },
+        {
+          "claim_origin": "observed",
+          "confidence": "high",
+          "text": "Acoustic"
+        },
+        {
+          "claim_origin": "observed",
+          "confidence": "medium",
+          "text": "Open voicings"
+        }
+      ],
+      "recording_ids": [
+        "studio",
+        "stems"
+      ]
+    },
+    {
+      "category": "instrumentation",
+      "name": "Guitar 2",
+      "notes": [
+        {
+          "claim_origin": "observed",
+          "confidence": "high",
+          "text": "Right channel"
+        },
+        {
+          "claim_origin": "observed",
+          "confidence": "high",
+          "text": "Electric"
+        },
+        {
+          "claim_origin": "inferred",
+          "confidence": "medium",
+          "severity": "medium",
+          "text": "Octave doubling"
+        }
+      ],
+      "recording_ids": [
+        "studio"
+      ],
+      "severity": "medium"
+    },
+    {
+      "category": "performance",
+      "name": "Bass",
+      "notes": [
+        {
+          "claim_origin": "observed",
+          "confidence": "medium",
+          "text": "Walks to D/F#"
+        }
+      ],
+      "recording_ids": [
+        "studio",
+        "live",
+        "remaster"
+      ],
+      "severity": "low"
+    },
+    {
+      "category": "effects",
+      "name": "Effects",
+      "notes": [
+        {
+          "claim_origin": "inferred",
+          "confidence": "medium",
+          "recording_ids": [
+            "studio"
+          ],
+          "text": "Light chorus"
+        },
+        {
+          "claim_origin": "inferred",
+          "confidence": "medium",
+          "recording_ids": [
+            "studio"
+          ],
+          "text": "Spring reverb"
+        },
+        {
+          "claim_origin": "inferred",
+          "confidence": "low",
+          "recording_ids": [
+            "studio"
+          ],
+          "severity": "low",
+          "text": "Slight tape saturation"
+        },
+        {
+          "claim_origin": "inferred",
+          "confidence": "medium",
+          "recording_ids": [
+            "remaster"
+          ],
+          "severity": "medium",
+          "text": "Brighter high-end EQ"
+        }
+      ]
+    },
+    {
+      "category": "tuning",
+      "name": "Estimated tuning",
+      "notes": [
+        {
+          "claim_origin": "inferred",
+          "confidence": "medium",
+          "provenance": [
+            {
+              "claim_origin": "inferred",
+              "confidence": "medium",
+              "method": "tuner comparison",
+              "source_name": "Example recording",
+              "source_type": "audio",
+              "verification_status": "unverified"
+            }
+          ],
+          "recording_ids": [
+            "studio"
+          ],
+          "severity": "high",
+          "text": "Standard, approximately 15 cents flat"
+        },
+        {
+          "claim_origin": "inferred",
+          "confidence": "medium",
+          "recording_ids": [
+            "remaster"
+          ],
+          "severity": "high",
+          "text": "Standard concert pitch"
+        }
+      ]
+    },
+    {
+      "category": "arrangement",
+      "name": "Arrangement",
+      "notes": [
+        {
+          "claim_origin": "observed",
+          "confidence": "medium",
+          "recording_ids": [
+            "demo"
+          ],
+          "severity": "medium",
+          "text": "Stripped-down single acoustic guitar"
+        },
+        {
+          "claim_origin": "observed",
+          "confidence": "medium",
+          "recording_ids": [
+            "live"
+          ],
+          "severity": "low",
+          "text": "Extended outro vamp"
+        }
+      ]
+    },
+    {
+      "category": "mix",
+      "name": "Mix",
+      "notes": [
+        {
+          "claim_origin": "observed",
+          "confidence": "medium",
+          "recording_ids": [
+            "studio"
+          ],
+          "severity": "medium",
+          "text": "Wide acoustic/electric split"
+        },
+        {
+          "claim_origin": "inferred",
+          "confidence": "medium",
+          "recording_ids": [
+            "remaster"
+          ],
+          "severity": "medium",
+          "text": "Vocal-forward balance"
+        }
+      ]
+    },
+    {
+      "category": "source_quality",
+      "name": "Source quality",
+      "notes": [
+        {
+          "claim_origin": "observed",
+          "confidence": "high",
+          "recording_ids": [
+            "stems"
+          ],
+          "text": "Isolated guitar detail available"
+        },
+        {
+          "claim_origin": "observed",
+          "confidence": "medium",
+          "recording_ids": [
+            "live"
+          ],
+          "severity": "medium",
+          "text": "Audience ambience masks low-level parts"
+        }
+      ]
+    }
+  ],
+  "title": "Example Open-String Progression",
+  "tuning": "Standard",
+  "version": "2.0",
+  "version_history": [
+    {
+      "changes": [
+        "Initial transcription."
+      ],
+      "version": "1.0"
+    },
+    {
+      "changes": [
+        "Corrected Verse 2.",
+        "Changed Cmaj7 to Cadd9."
+      ],
+      "version": "1.1"
+    },
+    {
+      "changes": [
+        "Added alternate capo version.",
+        "Improved Guitar 2 voicings."
+      ],
+      "version": "1.2"
+    },
+    {
+      "changes": [
+        "Verified against isolated stems."
+      ],
+      "version": "2.0"
+    }
+  ]
+}

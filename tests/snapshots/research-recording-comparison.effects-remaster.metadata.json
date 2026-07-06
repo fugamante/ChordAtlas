@@ -1,0 +1,309 @@
+{
+  "chart_artist": "ChordAtlas",
+  "chart_schema_version": "1.0.0",
+  "chart_title": "Research Recording Comparison Study",
+  "comparison": {
+    "categories": [
+      {
+        "category": "effects",
+        "claim_count": 1,
+        "differences": [
+          {
+            "claims": [
+              {
+                "claim_origin": "inferred",
+                "confidence": "medium",
+                "group": "Effects",
+                "provenance": [
+                  {
+                    "claim_origin": "inferred",
+                    "confidence": "medium",
+                    "method": "EQ curve comparison",
+                    "source_name": "Remaster release",
+                    "source_type": "audio",
+                    "source_url": "https://example.invalid/audio/remaster",
+                    "timestamp_range": "01:10-01:35",
+                    "verification_status": "unverified"
+                  }
+                ],
+                "provenance_summary": "audio / Remaster release / 01:10-01:35 / EQ curve comparison / unverified",
+                "severity": "medium",
+                "source_specific": true,
+                "text": "Brighter high-end EQ"
+              }
+            ],
+            "provenance": [
+              {
+                "claim_origin": "verified",
+                "confidence": "high",
+                "evidence_refs": [
+                  {
+                    "ref_id": "remaster-booklet",
+                    "source_name": "Remaster booklet",
+                    "source_url": "https://example.invalid/evidence/remaster-booklet"
+                  }
+                ],
+                "method": "release metadata inspection",
+                "source_name": "Remaster release",
+                "source_type": "audio",
+                "source_url": "https://example.invalid/audio/remaster",
+                "verification_status": "verified"
+              }
+            ],
+            "recording_id": "remaster",
+            "source_url": "https://example.invalid/audio/remaster",
+            "title": "Remaster",
+            "version_label": "2018 remaster"
+          }
+        ],
+        "label": "Effects",
+        "recordings": [
+          {
+            "claim_count": 1,
+            "claims": [
+              {
+                "claim_origin": "inferred",
+                "confidence": "medium",
+                "group": "Effects",
+                "provenance": [
+                  {
+                    "claim_origin": "inferred",
+                    "confidence": "medium",
+                    "method": "EQ curve comparison",
+                    "source_name": "Remaster release",
+                    "source_type": "audio",
+                    "source_url": "https://example.invalid/audio/remaster",
+                    "timestamp_range": "01:10-01:35",
+                    "verification_status": "unverified"
+                  }
+                ],
+                "provenance_summary": "audio / Remaster release / 01:10-01:35 / EQ curve comparison / unverified",
+                "severity": "medium",
+                "source_specific": true,
+                "text": "Brighter high-end EQ"
+              }
+            ],
+            "id": "remaster",
+            "provenance": [
+              {
+                "claim_origin": "verified",
+                "confidence": "high",
+                "evidence_refs": [
+                  {
+                    "ref_id": "remaster-booklet",
+                    "source_name": "Remaster booklet",
+                    "source_url": "https://example.invalid/evidence/remaster-booklet"
+                  }
+                ],
+                "method": "release metadata inspection",
+                "source_name": "Remaster release",
+                "source_type": "audio",
+                "source_url": "https://example.invalid/audio/remaster",
+                "verification_status": "verified"
+              }
+            ],
+            "source_specific_count": 1,
+            "source_url": "https://example.invalid/audio/remaster",
+            "title": "Remaster",
+            "version_label": "2018 remaster"
+          }
+        ],
+        "severity_counts": {
+          "medium": 1
+        },
+        "shared_count": 1,
+        "source_specific_count": 1
+      }
+    ],
+    "chart_artist": "ChordAtlas",
+    "chart_title": "Research Recording Comparison Study",
+    "comparison_schema_version": "1.0.0",
+    "recordings": [
+      {
+        "id": "remaster",
+        "notes": [
+          "Mastering changes affect high-end detail."
+        ],
+        "provenance": [
+          {
+            "claim_origin": "verified",
+            "confidence": "high",
+            "evidence_refs": [
+              {
+                "ref_id": "remaster-booklet",
+                "source_name": "Remaster booklet",
+                "source_url": "https://example.invalid/evidence/remaster-booklet"
+              }
+            ],
+            "method": "release metadata inspection",
+            "source_name": "Remaster release",
+            "source_type": "audio",
+            "source_url": "https://example.invalid/audio/remaster",
+            "verification_status": "verified"
+          }
+        ],
+        "source_url": "https://example.invalid/audio/remaster",
+        "title": "Remaster",
+        "version_label": "2018 remaster"
+      }
+    ],
+    "summary": {
+      "categories": [
+        {
+          "category": "effects",
+          "claim_count": 1,
+          "label": "Effects",
+          "severity_counts": {
+            "medium": 1
+          },
+          "shared_count": 1,
+          "source_specific_count": 1
+        }
+      ],
+      "category_count": 1,
+      "claim_count": 1,
+      "recording_count": 1,
+      "recordings": [
+        {
+          "claim_count": 1,
+          "id": "remaster",
+          "source_specific_count": 1,
+          "title": "Remaster"
+        }
+      ],
+      "severity_counts": {
+        "medium": 1
+      },
+      "shared_claim_count": 1,
+      "source_specific_claim_count": 1
+    }
+  },
+  "comparison_schema_version": "1.0.0",
+  "evidence_refs": [
+    {
+      "ref_id": "remaster-booklet",
+      "source_name": "Remaster booklet",
+      "source_url": "https://example.invalid/evidence/remaster-booklet"
+    }
+  ],
+  "export": {
+    "csv_columns": [
+      "category",
+      "category_label",
+      "recording_id",
+      "recording_title",
+      "group",
+      "text",
+      "severity",
+      "source_specific",
+      "confidence",
+      "claim_origin",
+      "provenance_summary",
+      "evidence_refs",
+      "recording_source_url",
+      "recording_version_label"
+    ],
+    "filters": {
+      "categories": [
+        "effects"
+      ],
+      "recording_ids": [
+        "remaster"
+      ],
+      "severities": [
+        "medium"
+      ],
+      "source_specific_only": true
+    },
+    "format": "csv",
+    "provenance_mode": "research"
+  },
+  "metadata_schema_version": "1.0.0",
+  "provenance_records": [
+    {
+      "claim_origin": "verified",
+      "confidence": "high",
+      "evidence_refs": [
+        {
+          "ref_id": "remaster-booklet",
+          "source_name": "Remaster booklet",
+          "source_url": "https://example.invalid/evidence/remaster-booklet"
+        }
+      ],
+      "method": "release metadata inspection",
+      "source_name": "Remaster release",
+      "source_type": "audio",
+      "source_url": "https://example.invalid/audio/remaster",
+      "verification_status": "verified"
+    },
+    {
+      "claim_origin": "inferred",
+      "confidence": "medium",
+      "method": "EQ curve comparison",
+      "source_name": "Remaster release",
+      "source_type": "audio",
+      "source_url": "https://example.invalid/audio/remaster",
+      "timestamp_range": "01:10-01:35",
+      "verification_status": "unverified"
+    }
+  ],
+  "recordings": [
+    {
+      "id": "remaster",
+      "notes": [
+        "Mastering changes affect high-end detail."
+      ],
+      "provenance": [
+        {
+          "claim_origin": "verified",
+          "confidence": "high",
+          "evidence_refs": [
+            {
+              "ref_id": "remaster-booklet",
+              "source_name": "Remaster booklet",
+              "source_url": "https://example.invalid/evidence/remaster-booklet"
+            }
+          ],
+          "method": "release metadata inspection",
+          "source_name": "Remaster release",
+          "source_type": "audio",
+          "source_url": "https://example.invalid/audio/remaster",
+          "verification_status": "verified"
+        }
+      ],
+      "source_url": "https://example.invalid/audio/remaster",
+      "title": "Remaster",
+      "version_label": "2018 remaster"
+    }
+  ],
+  "summary": {
+    "categories": [
+      {
+        "category": "effects",
+        "claim_count": 1,
+        "label": "Effects",
+        "severity_counts": {
+          "medium": 1
+        },
+        "shared_count": 1,
+        "source_specific_count": 1
+      }
+    ],
+    "category_count": 1,
+    "claim_count": 1,
+    "recording_count": 1,
+    "recordings": [
+      {
+        "claim_count": 1,
+        "id": "remaster",
+        "source_specific_count": 1,
+        "title": "Remaster"
+      }
+    ],
+    "severity_counts": {
+      "medium": 1
+    },
+    "shared_claim_count": 1,
+    "source_specific_claim_count": 1
+  }
+}

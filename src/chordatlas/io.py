@@ -94,4 +94,139 @@ performance_notes:
   - Use ringing open-string voicings when possible.
   - Prefer playable guitar shapes over piano-style harmonic spellings.
   - Mark uncertain chords clearly.
+recordings:
+  studio:
+    title: Example recording
+    source_url: https://example.invalid/recording
+    version_label: Studio reference
+  stems:
+    title: Example isolated stems
+    version_label: Stem reference
+  live:
+    title: Example live performance
+    source_url: https://example.invalid/live
+    version_label: Live reference
+  demo:
+    title: Example acoustic demo
+    version_label: Demo reference
+  remaster:
+    title: Example remaster
+    source_url: https://example.invalid/remaster
+    version_label: Remaster reference
+structured_recording_notes:
+  Guitar 1:
+    category: instrumentation
+    recording_ids: [studio, stems]
+    notes:
+      - text: Left channel
+        claim_origin: observed
+        confidence: high
+      - text: Acoustic
+        claim_origin: observed
+        confidence: high
+      - text: Open voicings
+        claim_origin: observed
+        confidence: medium
+  Guitar 2:
+    category: instrumentation
+    severity: medium
+    recording_ids: [studio]
+    notes:
+      - text: Right channel
+        claim_origin: observed
+        confidence: high
+      - text: Electric
+        claim_origin: observed
+        confidence: high
+      - text: Octave doubling
+        claim_origin: inferred
+        confidence: medium
+        severity: medium
+  Bass:
+    category: performance
+    severity: low
+    recording_ids: [studio, live, remaster]
+    notes:
+      - text: Walks to D/F#
+        claim_origin: observed
+        confidence: medium
+  Effects:
+    category: effects
+    notes:
+      - text: Light chorus
+        claim_origin: inferred
+        confidence: medium
+        recording_id: studio
+      - text: Spring reverb
+        claim_origin: inferred
+        confidence: medium
+        recording_id: studio
+      - text: Slight tape saturation
+        claim_origin: inferred
+        confidence: low
+        severity: low
+        recording_id: studio
+      - text: Brighter high-end EQ
+        claim_origin: inferred
+        confidence: medium
+        severity: medium
+        recording_id: remaster
+  Estimated tuning:
+    category: tuning
+    notes:
+      - text: Standard, approximately 15 cents flat
+        claim_origin: inferred
+        confidence: medium
+        severity: high
+        recording_id: studio
+        provenance:
+          source_type: audio
+          source_name: Example recording
+          method: tuner comparison
+          confidence: medium
+          verification_status: unverified
+          claim_origin: inferred
+      - text: Standard concert pitch
+        claim_origin: inferred
+        confidence: medium
+        severity: high
+        recording_id: remaster
+  Arrangement:
+    category: arrangement
+    notes:
+      - text: Stripped-down single acoustic guitar
+        claim_origin: observed
+        confidence: medium
+        severity: medium
+        recording_id: demo
+      - text: Extended outro vamp
+        claim_origin: observed
+        confidence: medium
+        severity: low
+        recording_id: live
+  Mix:
+    category: mix
+    notes:
+      - text: Wide acoustic/electric split
+        claim_origin: observed
+        confidence: medium
+        severity: medium
+        recording_id: studio
+      - text: Vocal-forward balance
+        claim_origin: inferred
+        confidence: medium
+        severity: medium
+        recording_id: remaster
+  Source quality:
+    category: source_quality
+    notes:
+      - text: Isolated guitar detail available
+        claim_origin: observed
+        confidence: high
+        recording_id: stems
+      - text: Audience ambience masks low-level parts
+        claim_origin: observed
+        confidence: medium
+        severity: medium
+        recording_id: live
 """

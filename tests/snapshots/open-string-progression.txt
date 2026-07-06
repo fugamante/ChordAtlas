@@ -98,3 +98,243 @@ Performance Notes:
 - Use ringing open-string voicings when possible.
 - Prefer playable guitar shapes over piano-style harmonic spellings.
 - Mark uncertain chords clearly.
+
+════════════════════════════════════
+RECORDING NOTES
+════════════════════════════════════
+
+Recordings
+- studio: Example recording (Studio reference | https://example.invalid/recording)
+- stems: Example isolated stems (Stem reference)
+- live: Example live performance (Live reference | https://example.invalid/live)
+- demo: Example acoustic demo (Demo reference)
+- remaster: Example remaster (Remaster reference | https://example.invalid/remaster)
+
+Guitar 1 [Example recording, Example isolated stems]
+✓ Left channel
+✓ Acoustic
+✓ Open voicings
+
+Guitar 2 [Example recording]
+✓ Right channel
+✓ Electric
+✓ Octave doubling
+
+Bass [Example recording, Example live performance, Example remaster]
+✓ Walks to D/F#
+
+Effects
+✓ Light chorus [Example recording]
+✓ Spring reverb [Example recording]
+✓ Slight tape saturation [Example recording]
+✓ Brighter high-end EQ [Example remaster]
+
+Estimated tuning
+✓ Standard, approximately 15 cents flat [Example recording]
+✓ Standard concert pitch [Example remaster]
+
+Arrangement
+✓ Stripped-down single acoustic guitar [Example acoustic demo]
+✓ Extended outro vamp [Example live performance]
+
+Mix
+✓ Wide acoustic/electric split [Example recording]
+✓ Vocal-forward balance [Example remaster]
+
+Source quality
+✓ Isolated guitar detail available [Example isolated stems]
+✓ Audience ambience masks low-level parts [Example live performance]
+
+════════════════════════════════════
+RECORDING SOURCE COMPARISON
+════════════════════════════════════
+
+Summary
+- Instrumentation: 0 shared, 9 source-specific; severity medium=3
+- Performance: 0 shared, 3 source-specific; severity low=3
+- Effects: 0 shared, 4 source-specific; severity medium=1, low=1
+- Tuning: 0 shared, 2 source-specific; severity high=2
+- Arrangement: 0 shared, 2 source-specific; severity medium=1, low=1
+- Mix: 0 shared, 2 source-specific; severity medium=2
+- Source Quality: 0 shared, 2 source-specific; severity medium=1
+
+By source:
+- Example recording: 12 claims, 12 source-specific
+- Example isolated stems: 4 claims, 4 source-specific
+- Example live performance: 3 claims, 3 source-specific
+- Example acoustic demo: 1 claims, 1 source-specific
+- Example remaster: 4 claims, 4 source-specific
+
+Instrumentation
+Example recording
+- Guitar 1: Left channel
+- Guitar 1: Acoustic
+- Guitar 1: Open voicings
+- Guitar 2: Right channel [medium severity]
+- Guitar 2: Electric [medium severity]
+- Guitar 2: Octave doubling [medium severity]
+
+Example isolated stems
+- Guitar 1: Left channel
+- Guitar 1: Acoustic
+- Guitar 1: Open voicings
+
+Example live performance
+- No scoped recording-note claims.
+
+Example acoustic demo
+- No scoped recording-note claims.
+
+Example remaster
+- No scoped recording-note claims.
+
+Differences
+- Example recording:
+  - Guitar 1: Left channel
+  - Guitar 1: Acoustic
+  - Guitar 1: Open voicings
+  - Guitar 2: Right channel [medium severity]
+  - Guitar 2: Electric [medium severity]
+  - Guitar 2: Octave doubling [medium severity]
+- Example isolated stems:
+  - Guitar 1: Left channel
+  - Guitar 1: Acoustic
+  - Guitar 1: Open voicings
+
+Performance
+Example recording
+- Bass: Walks to D/F# [low severity]
+
+Example isolated stems
+- No scoped recording-note claims.
+
+Example live performance
+- Bass: Walks to D/F# [low severity]
+
+Example acoustic demo
+- No scoped recording-note claims.
+
+Example remaster
+- Bass: Walks to D/F# [low severity]
+
+Differences
+- Example recording:
+  - Bass: Walks to D/F# [low severity]
+- Example live performance:
+  - Bass: Walks to D/F# [low severity]
+- Example remaster:
+  - Bass: Walks to D/F# [low severity]
+
+Effects
+Example recording
+- Effects: Light chorus
+- Effects: Spring reverb
+- Effects: Slight tape saturation [low severity]
+
+Example isolated stems
+- No scoped recording-note claims.
+
+Example live performance
+- No scoped recording-note claims.
+
+Example acoustic demo
+- No scoped recording-note claims.
+
+Example remaster
+- Effects: Brighter high-end EQ [medium severity]
+
+Differences
+- Example recording:
+  - Effects: Light chorus
+  - Effects: Spring reverb
+  - Effects: Slight tape saturation [low severity]
+- Example remaster:
+  - Effects: Brighter high-end EQ [medium severity]
+
+Tuning
+Example recording
+- Estimated tuning: Standard, approximately 15 cents flat [high severity]
+
+Example isolated stems
+- No scoped recording-note claims.
+
+Example live performance
+- No scoped recording-note claims.
+
+Example acoustic demo
+- No scoped recording-note claims.
+
+Example remaster
+- Estimated tuning: Standard concert pitch [high severity]
+
+Differences
+- Example recording:
+  - Estimated tuning: Standard, approximately 15 cents flat [high severity]
+- Example remaster:
+  - Estimated tuning: Standard concert pitch [high severity]
+
+Arrangement
+Example recording
+- No scoped recording-note claims.
+
+Example isolated stems
+- No scoped recording-note claims.
+
+Example live performance
+- Arrangement: Extended outro vamp [low severity]
+
+Example acoustic demo
+- Arrangement: Stripped-down single acoustic guitar [medium severity]
+
+Example remaster
+- No scoped recording-note claims.
+
+Differences
+- Example live performance:
+  - Arrangement: Extended outro vamp [low severity]
+- Example acoustic demo:
+  - Arrangement: Stripped-down single acoustic guitar [medium severity]
+
+Mix
+Example recording
+- Mix: Wide acoustic/electric split [medium severity]
+
+Example isolated stems
+- No scoped recording-note claims.
+
+Example live performance
+- No scoped recording-note claims.
+
+Example acoustic demo
+- No scoped recording-note claims.
+
+Example remaster
+- Mix: Vocal-forward balance [medium severity]
+
+Differences
+- Example recording:
+  - Mix: Wide acoustic/electric split [medium severity]
+- Example remaster:
+  - Mix: Vocal-forward balance [medium severity]
+
+Source Quality
+Example recording
+- No scoped recording-note claims.
+
+Example isolated stems
+- Source quality: Isolated guitar detail available
+
+Example live performance
+- Source quality: Audience ambience masks low-level parts [medium severity]
+
+Example acoustic demo
+- No scoped recording-note claims.
+
+Example remaster
+- No scoped recording-note claims.
+
+Differences
+- Example isolated stems:
+  - Source quality: Isolated guitar detail available
+- Example live performance:
+  - Source quality: Audience ambience masks low-level parts [medium severity]

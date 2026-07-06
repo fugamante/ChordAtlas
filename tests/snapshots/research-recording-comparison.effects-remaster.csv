@@ -1,0 +1,2 @@
+category,category_label,recording_id,recording_title,group,text,severity,source_specific,confidence,claim_origin,provenance_summary,evidence_refs,recording_source_url,recording_version_label
+effects,Effects,remaster,Remaster,Effects,Brighter high-end EQ,medium,true,medium,inferred,audio / Remaster release / 01:10-01:35 / EQ curve comparison / unverified,,https://example.invalid/audio/remaster,2018 remaster

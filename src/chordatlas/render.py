@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Literal
+from typing import Any, Literal
 
 from chordatlas.chords import COMMON_CHORD_SHAPES
-from chordatlas.models import ChartMeasure, ChordShape, SongChart
+from chordatlas.compare import claim_label, comparison_to_mapping, counts_label
+from chordatlas.models import (
+    ChartMeasure,
+    ChordShape,
+    RecordingNote,
+    RecordingNoteGroup,
+    RecordingSource,
+    SongChart,
+)
 from chordatlas.provenance import (
     Confidence,
     ProvenanceRecord,
@@ -220,9 +228,217 @@ def _analysis_lines(
             lines.append("")
     if chart.performance_notes:
         lines.extend(_note_block("Performance Notes", chart.performance_notes, markdown=markdown))
-    if chart.recording_notes:
-        lines.extend(_note_block("Recording Notes", chart.recording_notes, markdown=markdown))
+    if chart.recordings or chart.recording_notes or chart.structured_recording_notes:
+        lines.extend(
+            _recording_notes_lines(
+                chart,
+                markdown=markdown,
+                provenance_mode=provenance_mode,
+            )
+        )
+        lines.extend(_recording_comparison_lines(chart, markdown=markdown))
     return _strip_trailing_blank(lines)
+
+
+def _recording_notes_lines(
+    chart: SongChart,
+    *,
+    markdown: bool,
+    provenance_mode: ProvenanceMode,
+) -> list[str]:
+    if chart.recording_notes and not chart.structured_recording_notes:
+        return _note_block("Recording Notes", chart.recording_notes, markdown=markdown)
+
+    lines = ["", "## Recording Notes" if markdown else DIVIDER]
+    if not markdown:
+        lines.append("RECORDING NOTES")
+        lines.append(DIVIDER)
+    lines.append("")
+
+    if chart.recordings:
+        lines.extend(_recording_sources_lines(chart.recordings, markdown=markdown))
+        lines.append("")
+
+    if chart.recording_notes:
+        lines.extend(_recording_group_lines(
+            RecordingNoteGroup(
+                name="General",
+                notes=tuple(RecordingNote(text=note) for note in chart.recording_notes),
+            ),
+            recordings=chart.recordings,
+            markdown=markdown,
+            provenance_mode=provenance_mode,
+        ))
+        lines.append("")
+
+    for group in chart.structured_recording_notes:
+        lines.extend(
+            _recording_group_lines(
+                group,
+                recordings=chart.recordings,
+                markdown=markdown,
+                provenance_mode=provenance_mode,
+            )
+        )
+        lines.append("")
+
+    return _strip_trailing_blank(lines)
+
+
+def _recording_sources_lines(
+    recordings: tuple[RecordingSource, ...],
+    *,
+    markdown: bool,
+) -> list[str]:
+    lines = ["### Recordings" if markdown else "Recordings"]
+    for recording in recordings:
+        details = [recording.version_label, recording.source_url]
+        detail = " | ".join(item for item in details if item)
+        label = f"{recording.id}: {recording.title}"
+        if detail:
+            label = f"{label} ({detail})"
+        lines.append(f"- {label}" if markdown else f"- {label}")
+        for note in recording.notes:
+            lines.append(f"  - {note}")
+    return lines
+
+
+def _recording_comparison_lines(chart: SongChart, *, markdown: bool) -> list[str]:
+    data = comparison_to_mapping(chart)
+    if not data["categories"]:
+        return []
+
+    lines = ["", "## Recording Source Comparison" if markdown else DIVIDER]
+    if not markdown:
+        lines.append("RECORDING SOURCE COMPARISON")
+        lines.append(DIVIDER)
+    lines.append("")
+    lines.extend(_recording_summary_lines(data, markdown=markdown))
+    lines.append("")
+
+    for category in data["categories"]:
+        lines.append(f"### {category['label']}" if markdown else category["label"])
+        for recording in category["recordings"]:
+            lines.append(f"#### {recording['title']}" if markdown else recording["title"])
+            claims = recording["claims"]
+            if claims:
+                lines.extend(f"- {claim_label(claim)}" for claim in claims)
+            else:
+                lines.append("- No scoped recording-note claims.")
+            lines.append("")
+        lines.extend(_recording_difference_lines(category, markdown=markdown))
+        lines.append("")
+    return _strip_trailing_blank(lines)
+
+
+def _recording_summary_lines(data: dict[str, Any], *, markdown: bool) -> list[str]:
+    summary = data["summary"]
+    lines = ["### Summary" if markdown else "Summary"]
+    for category in summary["categories"]:
+        line = (
+            f"{category['label']}: "
+            f"{category['shared_count']} shared, "
+            f"{category['source_specific_count']} source-specific"
+        )
+        if category["severity_counts"]:
+            line = f"{line}; severity {counts_label(category['severity_counts'])}"
+        lines.append(f"- {line}")
+
+    lines.append("")
+    lines.append("By source:")
+    for recording in summary["recordings"]:
+        lines.append(
+            f"- {recording['title']}: {recording['claim_count']} claims, "
+            f"{recording['source_specific_count']} source-specific"
+        )
+    return lines
+
+
+def _recording_difference_lines(category: dict[str, Any], *, markdown: bool) -> list[str]:
+    lines = ["#### Differences" if markdown else "Differences"]
+    if not category["differences"]:
+        lines.append("- No source-specific differences in scoped recording notes.")
+        return lines
+
+    for difference in category["differences"]:
+        lines.append(f"- {difference['title']}:")
+        lines.extend(f"  - {claim_label(claim)}" for claim in difference["claims"])
+    return lines
+
+
+def _recording_group_lines(
+    group: RecordingNoteGroup,
+    *,
+    recordings: tuple[RecordingSource, ...],
+    markdown: bool,
+    provenance_mode: ProvenanceMode,
+) -> list[str]:
+    scope = _recording_scope(group.recording_ids, recordings)
+    title = group.name + (f" [{scope}]" if scope else "")
+    lines = [f"### {title}" if markdown else title]
+    if group.value:
+        lines.extend(
+            _recording_note_lines(
+                group.value,
+                recordings=recordings,
+                markdown=markdown,
+                provenance_mode=provenance_mode,
+                marker="",
+            )
+        )
+    if group.notes:
+        marker = "- " if markdown else "✓ "
+        for note in group.notes:
+            lines.extend(
+                _recording_note_lines(
+                    note,
+                    recordings=recordings,
+                    markdown=markdown,
+                    provenance_mode=provenance_mode,
+                    marker=marker,
+                )
+            )
+    lines.extend(_provenance_lines(group.provenance, mode=provenance_mode, markdown=markdown))
+    return lines
+
+
+def _recording_note_lines(
+    note: RecordingNote,
+    *,
+    recordings: tuple[RecordingSource, ...],
+    markdown: bool,
+    provenance_mode: ProvenanceMode,
+    marker: str,
+) -> list[str]:
+    scope = _recording_scope(note.recording_ids, recordings)
+    scope_label = f" [{scope}]" if scope else ""
+    lines = [f"{marker}{note.text}{scope_label}{_recording_note_suffix(note, provenance_mode)}"]
+    if provenance_mode in {"standard", "research"}:
+        lines.extend(_provenance_lines(note.provenance, mode=provenance_mode, markdown=markdown))
+    return lines
+
+
+def _recording_scope(
+    recording_ids: tuple[str, ...],
+    recordings: tuple[RecordingSource, ...],
+) -> str:
+    if not recording_ids:
+        return ""
+    titles_by_id = {recording.id: recording.title for recording in recordings}
+    return ", ".join(titles_by_id.get(recording_id, recording_id) for recording_id in recording_ids)
+
+
+def _recording_note_suffix(note: RecordingNote, provenance_mode: ProvenanceMode) -> str:
+    if provenance_mode == "minimal":
+        return ""
+    parts: list[str] = []
+    if note.claim_origin:
+        parts.append(note.claim_origin.value.replace("_", " "))
+    if note.confidence:
+        parts.append(f"{format_confidence(note.confidence)} confidence")
+    if note.severity:
+        parts.append(f"{note.severity} severity")
+    return f" ({', '.join(parts)})" if parts else ""
 
 
 def _note_block(title: str, notes: Iterable[str], *, markdown: bool) -> list[str]:

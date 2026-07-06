@@ -1,0 +1,215 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chordatlas.org/schemas/recording-comparison.schema.json",
+  "title": "ChordAtlas RecordingComparison",
+  "description": "Derived machine-readable recording-source comparison analytics export.",
+  "type": "object",
+  "required": [
+    "comparison_schema_version",
+    "chart_title",
+    "recordings",
+    "summary",
+    "categories"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "comparison_schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "chart_title": { "type": "string", "minLength": 1 },
+    "chart_artist": { "type": ["string", "null"] },
+    "recordings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/recordingSource" }
+    },
+    "summary": { "$ref": "#/$defs/summary" },
+    "categories": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/categoryComparison" }
+    }
+  },
+  "$defs": {
+    "countMap": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "recordingSource": {
+      "type": "object",
+      "required": ["id", "title"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "source_url": { "type": "string" },
+        "version_label": { "type": "string" },
+        "notes": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "provenance": {
+          "$ref": "https://chordatlas.org/schemas/provenance-record.schema.json#/$defs/provenanceList"
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "recording_count",
+        "category_count",
+        "claim_count",
+        "shared_claim_count",
+        "source_specific_claim_count",
+        "severity_counts",
+        "categories",
+        "recordings"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "recording_count": { "type": "integer", "minimum": 0 },
+        "category_count": { "type": "integer", "minimum": 0 },
+        "claim_count": { "type": "integer", "minimum": 0 },
+        "shared_claim_count": { "type": "integer", "minimum": 0 },
+        "source_specific_claim_count": { "type": "integer", "minimum": 0 },
+        "severity_counts": { "$ref": "#/$defs/countMap" },
+        "categories": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/categorySummary" }
+        },
+        "recordings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/recordingSummary" }
+        }
+      }
+    },
+    "categorySummary": {
+      "type": "object",
+      "required": [
+        "category",
+        "label",
+        "claim_count",
+        "shared_count",
+        "source_specific_count",
+        "severity_counts"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "category": { "type": "string" },
+        "label": { "type": "string" },
+        "claim_count": { "type": "integer", "minimum": 0 },
+        "shared_count": { "type": "integer", "minimum": 0 },
+        "source_specific_count": { "type": "integer", "minimum": 0 },
+        "severity_counts": { "$ref": "#/$defs/countMap" }
+      }
+    },
+    "recordingSummary": {
+      "type": "object",
+      "required": ["id", "title", "claim_count", "source_specific_count"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "claim_count": { "type": "integer", "minimum": 0 },
+        "source_specific_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "categoryComparison": {
+      "type": "object",
+      "required": [
+        "category",
+        "label",
+        "claim_count",
+        "shared_count",
+        "source_specific_count",
+        "severity_counts",
+        "recordings",
+        "differences"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "category": { "type": "string" },
+        "label": { "type": "string" },
+        "claim_count": { "type": "integer", "minimum": 0 },
+        "shared_count": { "type": "integer", "minimum": 0 },
+        "source_specific_count": { "type": "integer", "minimum": 0 },
+        "severity_counts": { "$ref": "#/$defs/countMap" },
+        "recordings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/categoryRecording" }
+        },
+        "differences": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/recordingDifference" }
+        }
+      }
+    },
+    "categoryRecording": {
+      "type": "object",
+      "required": ["id", "title", "claim_count", "source_specific_count", "claims"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "source_url": { "type": "string" },
+        "version_label": { "type": "string" },
+        "provenance": {
+          "$ref": "https://chordatlas.org/schemas/provenance-record.schema.json#/$defs/provenanceList"
+        },
+        "claim_count": { "type": "integer", "minimum": 0 },
+        "source_specific_count": { "type": "integer", "minimum": 0 },
+        "claims": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/claim" }
+        }
+      }
+    },
+    "recordingDifference": {
+      "type": "object",
+      "required": ["recording_id", "title", "claims"],
+      "additionalProperties": false,
+      "properties": {
+        "recording_id": { "type": "string" },
+        "title": { "type": "string" },
+        "source_url": { "type": "string" },
+        "version_label": { "type": "string" },
+        "provenance": {
+          "$ref": "https://chordatlas.org/schemas/provenance-record.schema.json#/$defs/provenanceList"
+        },
+        "claims": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/claim" }
+        }
+      }
+    },
+    "claim": {
+      "type": "object",
+      "required": ["group", "text", "source_specific"],
+      "additionalProperties": false,
+      "properties": {
+        "group": { "type": "string" },
+        "text": { "type": "string" },
+        "severity": { "type": "string" },
+        "confidence": {
+          "$ref": "https://chordatlas.org/schemas/provenance-record.schema.json#/$defs/confidence"
+        },
+        "claim_origin": {
+          "$ref": "https://chordatlas.org/schemas/provenance-record.schema.json#/$defs/claimOrigin"
+        },
+        "provenance_summary": { "type": "string" },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "https://chordatlas.org/schemas/provenance-record.schema.json#/$defs/evidenceReference"
+          }
+        },
+        "provenance": {
+          "$ref": "https://chordatlas.org/schemas/provenance-record.schema.json#/$defs/provenanceList"
+        },
+        "source_specific": { "type": "boolean" }
+      }
+    }
+  }
+}
