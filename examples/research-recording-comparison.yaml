@@ -1,0 +1,354 @@
+title: Research Recording Comparison Study
+artist: ChordAtlas
+key: A minor
+tuning: Standard
+capo: None
+version: "1.0"
+confidence: High
+provenance:
+  source_type: contributor
+  source_name: ChordAtlas research fixture
+  method: curated test fixture
+  contributor: ChordAtlas Maintainers
+  confidence: high
+  verification_status: verified
+  claim_origin: user_entered
+  evidence_refs:
+    - ref_id: fixture-readme
+      source_name: Research fixture notes
+      source_url: https://example.invalid/chordatlas/research-fixture
+sections:
+  - name: Intro
+    bars:
+      - [Am]
+      - [G]
+      - [Fmaj7]
+      - [E7]
+analysis:
+  roman:
+    - "i"
+    - "VII"
+    - "VImaj7"
+    - "V7"
+performance_notes:
+  - Use the chart as a research fixture for comparison exports.
+recordings:
+  studio:
+    title: Studio master
+    source_url: https://example.invalid/audio/studio-master
+    version_label: 1974 studio master
+    notes:
+      - Full-band stereo mix.
+    provenance:
+      source_type: audio
+      source_name: Studio master transfer
+      source_url: https://example.invalid/audio/studio-master
+      method: archival transfer metadata
+      confidence: high
+      verification_status: verified
+      claim_origin: verified
+      evidence_refs:
+        - ref_id: studio-master-log
+          source_name: Studio master transfer log
+          source_url: https://example.invalid/evidence/studio-master-log
+  stems:
+    title: Isolated guitar stems
+    source_url: https://example.invalid/audio/guitar-stems
+    version_label: 2026 stem extraction
+    notes:
+      - Guitar and bass sources separated for comparison.
+    provenance:
+      source_type: stem
+      source_name: Guitar stem set
+      source_url: https://example.invalid/audio/guitar-stems
+      method: stem separation audit
+      confidence: high
+      verification_status: verified
+      claim_origin: computed
+      evidence_refs:
+        - ref_id: stems-audit
+          source_name: Stem separation audit
+          source_url: https://example.invalid/evidence/stems-audit
+  live:
+    title: Live broadcast
+    source_url: https://example.invalid/video/live-broadcast
+    version_label: 1975 broadcast
+    notes:
+      - Broadcast audio has audience bleed.
+    provenance:
+      source_type: video
+      source_name: Live broadcast footage
+      source_url: https://example.invalid/video/live-broadcast
+      timestamp_range: 00:00-03:42
+      method: video source inspection
+      confidence: medium
+      verification_status: verified
+      claim_origin: observed
+      evidence_refs:
+        - ref_id: live-broadcast-archive
+          source_name: Broadcast archive listing
+          source_url: https://example.invalid/evidence/live-broadcast
+  remaster:
+    title: Remaster
+    source_url: https://example.invalid/audio/remaster
+    version_label: 2018 remaster
+    notes:
+      - Mastering changes affect high-end detail.
+    provenance:
+      source_type: audio
+      source_name: Remaster release
+      source_url: https://example.invalid/audio/remaster
+      method: release metadata inspection
+      confidence: high
+      verification_status: verified
+      claim_origin: verified
+      evidence_refs:
+        - ref_id: remaster-booklet
+          source_name: Remaster booklet
+          source_url: https://example.invalid/evidence/remaster-booklet
+structured_recording_notes:
+  Guitar 1:
+    category: instrumentation
+    notes:
+      - text: Left-channel acoustic guitar
+        recording_ids: [studio, stems]
+        claim_origin: observed
+        confidence: high
+        severity: medium
+        provenance:
+          source_type: stem
+          source_name: Guitar stem set
+          source_url: https://example.invalid/audio/guitar-stems
+          timestamp_range: 00:04-00:22
+          method: isolated stem audition
+          confidence: high
+          verification_status: verified
+          claim_origin: observed
+          evidence_refs:
+            - ref_id: stems-gtr1-left-0004
+              source_name: Guitar 1 stem
+              source_url: https://example.invalid/evidence/stems-gtr1-left-0004
+              timestamp_range: 00:04-00:22
+      - text: Single acoustic guitar carries intro in live version
+        recording_id: live
+        claim_origin: observed
+        confidence: medium
+        severity: medium
+        provenance:
+          source_type: video
+          source_name: Live broadcast footage
+          source_url: https://example.invalid/video/live-broadcast
+          timestamp_range: 00:05-00:24
+          method: performance video inspection
+          confidence: medium
+          verification_status: verified
+          claim_origin: observed
+          evidence_refs:
+            - ref_id: live-gtr1-0005
+              source_name: Live broadcast guitar view
+              source_url: https://example.invalid/evidence/live-gtr1-0005
+              timestamp_range: 00:05-00:24
+  Guitar 2:
+    category: instrumentation
+    notes:
+      - text: Right-channel electric octave doubling
+        recording_ids: [studio, stems]
+        claim_origin: observed
+        confidence: high
+        severity: high
+        provenance:
+          source_type: stem
+          source_name: Guitar stem set
+          source_url: https://example.invalid/audio/guitar-stems
+          timestamp_range: 00:12-00:32
+          method: isolated stem audition
+          confidence: high
+          verification_status: verified
+          claim_origin: observed
+          evidence_refs:
+            - ref_id: stems-gtr2-octaves-0012
+              source_name: Guitar 2 stem
+              source_url: https://example.invalid/evidence/stems-gtr2-octaves-0012
+              timestamp_range: 00:12-00:32
+      - text: Octave double muted in remaster center image
+        recording_id: remaster
+        claim_origin: inferred
+        confidence: medium
+        severity: medium
+        provenance:
+          source_type: audio
+          source_name: Remaster release
+          source_url: https://example.invalid/audio/remaster
+          timestamp_range: 00:12-00:32
+          method: stereo image comparison
+          confidence: medium
+          verification_status: unverified
+          claim_origin: inferred
+  Tuning:
+    category: tuning
+    notes:
+      - text: Standard tuning, approximately 12 cents flat
+        recording_id: studio
+        claim_origin: inferred
+        confidence: medium
+        severity: high
+        provenance:
+          source_type: audio
+          source_name: Studio master transfer
+          source_url: https://example.invalid/audio/studio-master
+          timestamp_range: 00:00-00:18
+          method: tuner comparison
+          confidence: medium
+          verification_status: unverified
+          claim_origin: inferred
+      - text: Standard concert pitch
+        recording_ids: [live, remaster]
+        claim_origin: observed
+        confidence: high
+        severity: high
+        provenance:
+          source_type: audio
+          source_name: Remaster release
+          source_url: https://example.invalid/audio/remaster
+          timestamp_range: 00:00-00:18
+          method: pitch reference comparison
+          confidence: high
+          verification_status: verified
+          claim_origin: observed
+          evidence_refs:
+            - ref_id: remaster-pitch-0000
+              source_name: Remaster pitch reference
+              source_url: https://example.invalid/evidence/remaster-pitch-0000
+              timestamp_range: 00:00-00:18
+  Effects:
+    category: effects
+    notes:
+      - text: Spring reverb on lead overdub
+        recording_ids: [studio, stems]
+        claim_origin: observed
+        confidence: high
+        severity: medium
+        provenance:
+          source_type: stem
+          source_name: Guitar stem set
+          source_url: https://example.invalid/audio/guitar-stems
+          timestamp_range: 00:20-00:44
+          method: isolated stem audition
+          confidence: high
+          verification_status: verified
+          claim_origin: observed
+          evidence_refs:
+            - ref_id: stems-reverb-0020
+              source_name: Lead guitar stem
+              source_url: https://example.invalid/evidence/stems-reverb-0020
+              timestamp_range: 00:20-00:44
+      - text: Tape saturation more apparent
+        recording_id: studio
+        claim_origin: inferred
+        confidence: medium
+        severity: low
+        provenance:
+          source_type: audio
+          source_name: Studio master transfer
+          source_url: https://example.invalid/audio/studio-master
+          timestamp_range: 01:10-01:35
+          method: harmonic distortion estimate
+          confidence: medium
+          verification_status: unverified
+          claim_origin: inferred
+      - text: Brighter high-end EQ
+        recording_id: remaster
+        claim_origin: inferred
+        confidence: medium
+        severity: medium
+        provenance:
+          source_type: audio
+          source_name: Remaster release
+          source_url: https://example.invalid/audio/remaster
+          timestamp_range: 01:10-01:35
+          method: EQ curve comparison
+          confidence: medium
+          verification_status: unverified
+          claim_origin: inferred
+  Arrangement:
+    category: arrangement
+    notes:
+      - text: Extended outro vamp
+        recording_id: live
+        claim_origin: observed
+        confidence: high
+        severity: medium
+        provenance:
+          source_type: video
+          source_name: Live broadcast footage
+          source_url: https://example.invalid/video/live-broadcast
+          timestamp_range: 03:05-03:42
+          method: timeline comparison
+          confidence: high
+          verification_status: verified
+          claim_origin: observed
+          evidence_refs:
+            - ref_id: live-outro-0305
+              source_name: Live broadcast outro
+              source_url: https://example.invalid/evidence/live-outro-0305
+              timestamp_range: 03:05-03:42
+      - text: Studio fade removes final cadence
+        recording_ids: [studio, remaster]
+        claim_origin: observed
+        confidence: high
+        severity: low
+        provenance:
+          source_type: audio
+          source_name: Studio master transfer
+          source_url: https://example.invalid/audio/studio-master
+          timestamp_range: 03:00-03:18
+          method: timeline comparison
+          confidence: high
+          verification_status: verified
+          claim_origin: observed
+          evidence_refs:
+            - ref_id: studio-fade-0300
+              source_name: Studio fade timing
+              source_url: https://example.invalid/evidence/studio-fade-0300
+              timestamp_range: 03:00-03:18
+  Source quality:
+    category: source_quality
+    notes:
+      - text: Isolated stems reveal low-level pick noise
+        recording_id: stems
+        claim_origin: observed
+        confidence: high
+        severity: low
+        provenance:
+          source_type: stem
+          source_name: Guitar stem set
+          source_url: https://example.invalid/audio/guitar-stems
+          timestamp_range: 00:04-00:22
+          method: isolated stem audition
+          confidence: high
+          verification_status: verified
+          claim_origin: observed
+          evidence_refs:
+            - ref_id: stems-pick-noise-0004
+              source_name: Guitar stem pick noise
+              source_url: https://example.invalid/evidence/stems-pick-noise-0004
+              timestamp_range: 00:04-00:22
+      - text: Audience ambience masks quiet overdubs
+        recording_id: live
+        claim_origin: observed
+        confidence: medium
+        severity: medium
+        provenance:
+          source_type: video
+          source_name: Live broadcast footage
+          source_url: https://example.invalid/video/live-broadcast
+          timestamp_range: 00:12-00:32
+          method: broadcast audio inspection
+          confidence: medium
+          verification_status: verified
+          claim_origin: observed
+          evidence_refs:
+            - ref_id: live-audience-mask-0012
+              source_name: Live broadcast audio
+              source_url: https://example.invalid/evidence/live-audience-mask-0012
+              timestamp_range: 00:12-00:32

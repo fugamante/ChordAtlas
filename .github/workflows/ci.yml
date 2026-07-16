@@ -13,12 +13,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        # actions/checkout v4.2.2
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        # actions/checkout v7.0.0
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
       - name: Set up Python
-        # actions/setup-python v5.6.0
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        # actions/setup-python v6.3.0
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: "3.11"
           cache: pip
@@ -33,3 +33,36 @@ jobs:
         run: |
           chordchart validate examples/open-string-progression.yaml
           chordchart render examples/open-string-progression.yaml --format json | python -m json.tool >/tmp/chordatlas-example.json
+
+      - name: Check snapshots
+        shell: bash
+        run: |
+          set +e
+          chordchart snapshots check --format json --diff-dir snapshot-diffs > snapshot-result.json
+          status=$?
+          set -e
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("snapshot-result.json").read_text())
+          for filename in payload["drift_files"]:
+              print(f"::error file={filename}::Snapshot drift detected")
+
+          for item in payload["diffs"]:
+              artifact = item.get("diff_artifact")
+              if artifact:
+                  print(f"Diff artifact for {item['file']}: {artifact}")
+          PY
+
+          exit "$status"
+
+      - name: Upload snapshot diffs
+        if: always()
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: snapshot-diffs
+          path: snapshot-diffs
+          if-no-files-found: ignore

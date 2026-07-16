@@ -98,7 +98,8 @@ Primary capabilities:
 - Nashville numbers.
 - Difficulty rating.
 - Chord confidence.
-- Structured performance and recording notes.
+- Structured performance notes.
+- Recording-source analytics exports.
 
 Deliverable: charts that are clearer, more honest, and more useful than typical
 commercial chord pages.
@@ -258,7 +259,7 @@ Objective: preserve musical history.
 
 Primary capabilities:
 
-- Multiple recordings.
+- Recording-source comparison review workflows.
 - Live performance comparisons.
 - Album versions.
 - Demo versions.

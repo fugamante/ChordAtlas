@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chordatlas.org/schemas/recording-comparison-metadata.schema.json",
+  "title": "ChordAtlas RecordingComparisonMetadata",
+  "description": "Companion metadata sidecar for recording comparison CSV exports.",
+  "type": "object",
+  "required": [
+    "metadata_schema_version",
+    "comparison_schema_version",
+    "chart_schema_version",
+    "chart_title",
+    "export",
+    "recordings",
+    "summary",
+    "provenance_records",
+    "evidence_refs",
+    "comparison"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "metadata_schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "comparison_schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "chart_schema_version": { "type": "string" },
+    "chart_title": { "type": "string", "minLength": 1 },
+    "chart_artist": { "type": ["string", "null"] },
+    "export": { "$ref": "#/$defs/exportContext" },
+    "recordings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/recordingSource" }
+    },
+    "summary": {
+      "$ref": "https://chordatlas.org/schemas/recording-comparison.schema.json#/$defs/summary"
+    },
+    "provenance_records": {
+      "type": "array",
+      "items": {
+        "$ref": "https://chordatlas.org/schemas/provenance-record.schema.json#/$defs/provenanceRecord"
+      }
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "https://chordatlas.org/schemas/provenance-record.schema.json#/$defs/evidenceReference"
+      }
+    },
+    "comparison": {
+      "$ref": "https://chordatlas.org/schemas/recording-comparison.schema.json"
+    }
+  },
+  "$defs": {
+    "exportContext": {
+      "type": "object",
+      "required": ["format", "provenance_mode", "filters", "csv_columns"],
+      "additionalProperties": false,
+      "properties": {
+        "format": { "type": "string", "const": "csv" },
+        "provenance_mode": {
+          "type": "string",
+          "enum": ["minimal", "standard", "research"]
+        },
+        "filters": { "$ref": "#/$defs/comparisonFilters" },
+        "csv_columns": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "comparisonFilters": {
+      "type": "object",
+      "required": [
+        "categories",
+        "recording_ids",
+        "severities",
+        "source_specific_only"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "categories": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "recording_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "severities": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "source_specific_only": { "type": "boolean" }
+      }
+    },
+    "recordingSource": {
+      "type": "object",
+      "required": ["id", "title"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "source_url": { "type": "string" },
+        "version_label": { "type": "string" },
+        "notes": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "provenance": {
+          "$ref": "https://chordatlas.org/schemas/provenance-record.schema.json#/$defs/provenanceList"
+        }
+      }
+    }
+  }
+}

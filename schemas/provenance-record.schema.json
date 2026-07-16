@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chordatlas.org/schemas/provenance-record.schema.json",
+  "title": "ChordAtlas ProvenanceRecord",
+  "description": "Canonical JSON contract for citing evidence behind a ChordAtlas chart claim.",
+  "$ref": "#/$defs/provenanceRecord",
+  "$defs": {
+    "confidence": {
+      "type": "string",
+      "enum": ["low", "medium", "high"]
+    },
+    "sourceType": {
+      "type": "string",
+      "enum": [
+        "audio",
+        "video",
+        "stem",
+        "score",
+        "tab",
+        "liner_notes",
+        "interview",
+        "software",
+        "contributor",
+        "reference",
+        "unknown"
+      ]
+    },
+    "claimOrigin": {
+      "type": "string",
+      "enum": [
+        "observed",
+        "computed",
+        "inferred",
+        "verified",
+        "user_entered",
+        "unknown"
+      ]
+    },
+    "verificationStatus": {
+      "type": "string",
+      "enum": ["unverified", "verified", "disputed", "unknown"]
+    },
+    "timestampRange": {
+      "type": "string",
+      "pattern": "^\\d{1,2}:\\d{2}(:\\d{2})?\\s*[-–]\\s*\\d{1,2}:\\d{2}(:\\d{2})?$"
+    },
+    "provenanceList": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/provenanceRecord" }
+    },
+    "provenanceMap": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/provenanceList" }
+    },
+    "provenanceRecord": {
+      "type": "object",
+      "required": ["source_type", "verification_status", "claim_origin"],
+      "additionalProperties": false,
+      "properties": {
+        "source_type": { "$ref": "#/$defs/sourceType" },
+        "source_name": { "type": "string" },
+        "source_url": { "type": "string" },
+        "timestamp_range": { "$ref": "#/$defs/timestampRange" },
+        "method": { "type": "string" },
+        "contributor": { "type": "string" },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "created_at": { "type": "string" },
+        "notes": { "type": "string" },
+        "verification_status": { "$ref": "#/$defs/verificationStatus" },
+        "evidence_refs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/evidenceReference" }
+        },
+        "claim_origin": { "$ref": "#/$defs/claimOrigin" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "claim_origin": { "const": "inferred" } },
+            "required": ["claim_origin"]
+          },
+          "then": { "required": ["confidence"] }
+        },
+        {
+          "if": {
+            "properties": { "verification_status": { "const": "verified" } },
+            "required": ["verification_status"]
+          },
+          "then": {
+            "required": ["evidence_refs"],
+            "properties": {
+              "evidence_refs": { "minItems": 1 }
+            }
+          }
+        }
+      ]
+    },
+    "evidenceReference": {
+      "type": "object",
+      "required": ["ref_id"],
+      "additionalProperties": false,
+      "properties": {
+        "ref_id": { "type": "string", "minLength": 1 },
+        "source_name": { "type": "string" },
+        "source_url": { "type": "string" },
+        "timestamp_range": { "$ref": "#/$defs/timestampRange" },
+        "notes": { "type": "string" }
+      }
+    }
+  }
+}
