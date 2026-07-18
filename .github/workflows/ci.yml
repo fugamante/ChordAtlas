@@ -35,6 +35,7 @@ jobs:
           chordchart render examples/open-string-progression.yaml --format json | python -m json.tool >/tmp/chordatlas-example.json
 
       - name: Check snapshots
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set +e
