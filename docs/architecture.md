@@ -193,7 +193,9 @@ Schema mirror workflow:
 Packaging tests assert that wheel artifacts contain `chordatlas/schemas/*.json`,
 source distributions contain both repo-root and packaged schema files, the mirror
 matches the canonical package resources, and installed-package validation works
-outside the repository checkout.
+outside the repository checkout. Source distributions also retain the CI workflow
+consumed by the packaged workflow regression test, so `release-check` can run from
+an extracted sdist.
 
 Compatibility rules:
 

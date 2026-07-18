@@ -70,6 +70,7 @@ def test_sdist_contains_repo_and_packaged_schemas(built_dists: tuple[Path, Path]
     with tarfile.open(sdist_path) as sdist:
         names = set(sdist.getnames())
 
+    assert any(name.endswith("/.github/workflows/ci.yml") for name in names)
     assert any(name.endswith("/LICENSE") for name in names)
     for schema_name in SCHEMA_NAMES:
         assert any(
