@@ -59,6 +59,7 @@ def test_wheel_contains_packaged_schema_resources(built_dists: tuple[Path, Path]
     with zipfile.ZipFile(wheel_path) as wheel:
         names = set(wheel.namelist())
 
+    assert any(name.endswith(".dist-info/licenses/LICENSE") for name in names)
     for schema_name in SCHEMA_NAMES:
         assert f"chordatlas/schemas/{schema_name}" in names
 
@@ -69,6 +70,7 @@ def test_sdist_contains_repo_and_packaged_schemas(built_dists: tuple[Path, Path]
     with tarfile.open(sdist_path) as sdist:
         names = set(sdist.getnames())
 
+    assert any(name.endswith("/LICENSE") for name in names)
     for schema_name in SCHEMA_NAMES:
         assert any(
             name.endswith(f"/schemas/{schema_name}") and "/src/" not in name for name in names
