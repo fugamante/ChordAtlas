@@ -16,13 +16,23 @@ def test_ci_runs_snapshot_json_check_with_annotations_and_artifacts() -> None:
     assert "path: snapshot-diffs" in workflow
     assert "if-no-files-found: ignore" in workflow
 
+    install_step = re.search(
+        r"- name: Install project\n(?P<body>.*?)(?=\n\s+- name: Run tests)",
+        workflow,
+        re.DOTALL,
+    )
+    assert install_step is not None
+    assert "id: install" in install_step.group(0)
+
+    diagnostic_condition = "if: ${{ !cancelled() && steps.install.outcome == 'success' }}"
+
     snapshot_step = re.search(
         r"- name: Check snapshots\n(?P<body>.*?)(?=\n\s+- name: Upload snapshot diffs)",
         workflow,
         re.DOTALL,
     )
     assert snapshot_step is not None
-    assert "if: ${{ !cancelled() }}" in snapshot_step.group(0)
+    assert diagnostic_condition in snapshot_step.group(0)
     assert "continue-on-error" not in snapshot_step.group(0)
 
     upload_step = re.search(
@@ -31,7 +41,8 @@ def test_ci_runs_snapshot_json_check_with_annotations_and_artifacts() -> None:
         re.DOTALL,
     )
     assert upload_step is not None
-    assert "if: always()" in upload_step.group(0)
+    assert diagnostic_condition in upload_step.group(0)
+    assert "always()" not in upload_step.group(0)
 
     upload_pin = re.search(r"actions/upload-artifact@([0-9a-f]{40})", workflow)
     assert upload_pin is not None

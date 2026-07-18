@@ -24,6 +24,7 @@ jobs:
           cache: pip
 
       - name: Install project
+        id: install
         run: python -m pip install -e ".[dev]"
 
       - name: Run tests
@@ -35,7 +36,7 @@ jobs:
           chordchart render examples/open-string-progression.yaml --format json | python -m json.tool >/tmp/chordatlas-example.json
 
       - name: Check snapshots
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         shell: bash
         run: |
           set +e
@@ -60,7 +61,7 @@ jobs:
           exit "$status"
 
       - name: Upload snapshot diffs
-        if: always()
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         # actions/upload-artifact v7.0.1
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:

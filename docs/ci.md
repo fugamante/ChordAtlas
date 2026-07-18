@@ -31,13 +31,18 @@ The JSON payload includes:
 
 This example keeps snapshot checking separate from `pytest` so CI can emit clear
 annotations and upload full diff artifacts. The explicit status condition lets
-snapshot generation run after an earlier test failure while still skipping the
-step when the workflow is cancelled.
+snapshot generation run after an earlier test failure, provided installation
+succeeded, while still skipping diagnostics when installation fails or the
+workflow is cancelled.
 
 ```yaml
+- name: Install project
+  id: install
+  run: python -m pip install -e ".[dev]"
+
 - name: Check snapshots
   id: snapshots
-  if: ${{ !cancelled() }}
+  if: ${{ !cancelled() && steps.install.outcome == 'success' }}
   shell: bash
   run: |
     set +e
@@ -62,18 +67,22 @@ step when the workflow is cancelled.
     exit "$status"
 ```
 
-`!cancelled()` replaces GitHub Actions' implicit `success()` condition only for
-this step. It does not mask snapshot drift: the command's original exit status
-still fails the job after annotations and diff files are produced. The workflow
-does not use `continue-on-error` for snapshot validation.
+The explicit condition replaces GitHub Actions' implicit `success()` condition
+only after the required installation has succeeded. This lets snapshot
+diagnostics survive an ordinary `pytest` failure without attempting to invoke a
+missing CLI after installation failure, and it preserves cancellation. It does
+not mask snapshot drift: the command's original exit status still fails the job
+after annotations and diff files are produced. The workflow does not use
+`continue-on-error` for snapshot validation.
 
-To upload diff artifacts, add an upload step that always runs after the snapshot
-check. Follow the repository's action pinning policy; use an audited full commit
-SHA rather than a floating tag.
+Use the same prerequisite and cancellation condition for artifact upload. This
+keeps upload available after test or snapshot failure, but prevents it from
+running after installation failure or cancellation. Follow the repository's
+action pinning policy; use an audited full commit SHA rather than a floating tag.
 
 ```yaml
 - name: Upload snapshot diffs
-  if: always()
+  if: ${{ !cancelled() && steps.install.outcome == 'success' }}
   uses: actions/upload-artifact@<PINNED_UPLOAD_ARTIFACT_SHA>
   with:
     name: snapshot-diffs
