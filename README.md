@@ -627,6 +627,10 @@ Release checklist:
 4. Run `chordchart release-check`.
 5. Investigate any non-zero exit before publishing.
 
+## License
+
+ChordAtlas is licensed under the MIT License. See [LICENSE](LICENSE).
+
 ## Roadmap
 
 ChordAtlas grows in capability layers. The active product goal is the
