@@ -77,8 +77,8 @@ Replace `<PINNED_UPLOAD_ARTIFACT_SHA>` with the reviewed commit SHA selected for
 your repository. Do not use this placeholder in a committed workflow.
 
 The checked-in CI workflow currently pins `actions/upload-artifact` to the
-reviewed `v4.6.2` commit SHA and uploads `snapshot-diffs` only when diff files
-exist.
+reviewed Node 24-native `v7.0.1` commit SHA and uploads `snapshot-diffs` only
+when diff files exist.
 
 ## Targeted Checks
 
