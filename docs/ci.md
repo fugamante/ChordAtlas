@@ -97,6 +97,37 @@ The checked-in CI workflow currently pins `actions/upload-artifact` to the
 reviewed Node 24-native `v7.0.1` commit SHA and uploads `snapshot-diffs` only
 when diff files exist.
 
+## Trusted Publishing
+
+`.github/workflows/publish.yml` is the canonical PyPI Trusted Publisher
+workflow. It runs only when a non-prerelease GitHub release is published; push,
+pull-request, and manual-dispatch events cannot invoke it. The build job checks
+out the release tag and requires all of the following before building:
+
+- the tag is exactly `v` followed by the version in `pyproject.toml`;
+- the tag is annotated;
+- the checked-out commit is the tag target; and
+- the tag target is reachable from `origin/main`.
+
+The build job has only `contents: read`. It builds and checks the wheel and
+source distribution, then transfers them through a one-day GitHub Actions
+artifact. A separate `publish` job uses the protected `pypi` environment and is
+the only job granted `id-token: write`. It does not receive a username, password,
+or repository token for PyPI. All referenced actions are pinned to reviewed full
+commit SHAs, and an existing version is never skipped or overwritten.
+
+Configure the existing PyPI project with this exact trusted-publisher identity:
+
+- Owner: `fugamante`
+- Repository: `ChordAtlas`
+- Workflow filename: `publish.yml`
+- Environment: `pypi`
+
+The GitHub `pypi` environment must require approval and allow only version tags
+matching `v*`. Keep the project-scoped API token as a fallback until a separately
+authorized future release proves the OIDC exchange and upload end to end. Do not
+rerun the already-published `v0.1.0` release to test this workflow.
+
 ## Targeted Checks
 
 CI can check only one snapshot family when a job is scoped:

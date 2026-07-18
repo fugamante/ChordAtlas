@@ -40,6 +40,7 @@ packages = ["src/chordatlas"]
 [tool.hatch.build.targets.sdist]
 include = [
   "/.github/workflows/ci.yml",
+  "/.github/workflows/publish.yml",
   "/AGENTS.md",
   "/LICENSE",
   "/README.md",
