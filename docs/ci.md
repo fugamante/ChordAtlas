@@ -30,11 +30,14 @@ The JSON payload includes:
 ## GitHub Actions
 
 This example keeps snapshot checking separate from `pytest` so CI can emit clear
-annotations and upload full diff artifacts.
+annotations and upload full diff artifacts. The explicit status condition lets
+snapshot generation run after an earlier test failure while still skipping the
+step when the workflow is cancelled.
 
 ```yaml
 - name: Check snapshots
   id: snapshots
+  if: ${{ !cancelled() }}
   shell: bash
   run: |
     set +e
@@ -58,6 +61,11 @@ annotations and upload full diff artifacts.
 
     exit "$status"
 ```
+
+`!cancelled()` replaces GitHub Actions' implicit `success()` condition only for
+this step. It does not mask snapshot drift: the command's original exit status
+still fails the job after annotations and diff files are produced. The workflow
+does not use `continue-on-error` for snapshot validation.
 
 To upload diff artifacts, add an upload step that always runs after the snapshot
 check. Follow the repository's action pinning policy; use an audited full commit
