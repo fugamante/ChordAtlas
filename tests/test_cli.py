@@ -1308,38 +1308,41 @@ def test_broken_stdout_neutralization_falls_back_without_masking_cleanup_failure
 
 
 def test_render_subprocess_contains_real_broken_pipe(tmp_path) -> None:
-    chart_path = tmp_path / "large.yaml"
+    chart_path = tmp_path / "pipe.yaml"
     chart_path.write_text(
-        "title: Pipe\nanalysis:\n  payload: " + ("x" * 262_144) + "\n",
+        "title: Pipe\nsections: []\n",
         encoding="utf-8",
     )
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT / "src")
-    process = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "chordatlas.cli",
-            "render",
-            str(chart_path),
-            "--format",
-            "json",
-        ],
-        cwd=ROOT,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    assert process.stdout is not None
-    assert process.stderr is not None
-    assert process.stdout.read(1)
-    process.stdout.close()
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    try:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "chordatlas.cli",
+                "render",
+                str(chart_path),
+                "--format",
+                "json",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=write_fd,
+            stderr=subprocess.PIPE,
+        )
+    finally:
+        os.close(write_fd)
 
-    assert process.wait(timeout=10) == 1
-    stderr = process.stderr.read().decode("utf-8")
-    assert "BrokenPipeError" not in stderr
-    assert "Exception ignored" not in stderr
-    assert "Traceback" not in stderr
+    with process:
+        assert process.stderr is not None
+        assert process.wait(timeout=10) == 1
+        stderr = process.stderr.read().decode("utf-8")
+        assert "BrokenPipeError" not in stderr
+        assert "Exception ignored" not in stderr
+        assert "Traceback" not in stderr
 
 
 def test_cli_parser_preserves_healthy_root_help_bytes_and_exit(capsys) -> None:
