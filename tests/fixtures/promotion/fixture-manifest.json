@@ -1,0 +1,14 @@
+{
+  "authorization": {
+    "kind": "synthetic",
+    "license": "CC0-1.0",
+    "redistributable": true
+  },
+  "timebase": {
+    "sample_rate_hz": 1000,
+    "unit": "sample_frame"
+  },
+  "measure_boundaries_frames": [0, 1000, 2000, 3000],
+  "expected_chords": [["C"], ["G"], ["Am"]],
+  "copyrighted_lyrics": false
+}

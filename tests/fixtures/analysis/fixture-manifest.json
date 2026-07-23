@@ -1,0 +1,26 @@
+{
+  "fixture_schema_version": "1.0.0",
+  "fixtures": [
+    {
+      "id": "click-triad-progression-120bpm",
+      "generated": true,
+      "license": "MIT",
+      "reference": ["C:maj", "G:maj", "A:min", "F:maj"],
+      "purpose": "tempo, beat, key, chord, boundary, and evaluation plumbing"
+    },
+    {
+      "id": "synthetic-silence",
+      "generated": true,
+      "license": "MIT",
+      "reference": ["N.C."],
+      "purpose": "no-chord and empty-energy behavior"
+    }
+  ],
+  "review": {
+    "contains_copyrighted_lyrics": false,
+    "contains_human_performance": false,
+    "contains_third_party_recording": false,
+    "redistribution_authorized": true,
+    "quality_claim_scope": "deterministic synthetic fixtures only"
+  }
+}

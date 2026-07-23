@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "chordatlas"
 version = "0.1.0"
-description = "CLI-first tools for building structured guitar chord charts."
+description = "Local-first tools for turning authorized audio into editable guitar chord charts."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -13,18 +13,19 @@ authors = [
   { name = "ChordAtlas Maintainers" }
 ]
 dependencies = [
+  "jsonschema>=4.0",
   "PyYAML>=6.0.1"
 ]
 
 [project.optional-dependencies]
 dev = [
   "build>=1.0",
-  "jsonschema>=4.0",
   "pytest>=8.0"
 ]
 
 [project.scripts]
 chordchart = "chordatlas.cli:main"
+chordatlas-studio = "chordatlas.studio:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

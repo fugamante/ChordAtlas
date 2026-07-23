@@ -236,12 +236,12 @@ Snapshot policy:
 - Snapshot checks print compact unified diffs for drifted files. Inline diffs
   are capped to keep CI logs readable; `--diff-dir` writes complete `.diff`
   artifacts when deeper review is needed.
-- `chordchart snapshots check --format json` is the CI integration contract for
-  snapshot status. It reports target, checked files, drift files, truncation
-  status, diff line counts, and optional diff artifact paths while preserving
-  the text-mode exit codes.
-- See `docs/ci.md` for GitHub Actions examples that parse snapshot JSON, emit
-  build annotations, and upload full diff artifacts.
+- `chordchart snapshots check --format json` is the targeted diagnostic
+  interface for snapshot status. It reports target, checked files, drift files,
+  truncation status, diff line counts, and optional diff artifact paths while
+  preserving the text-mode exit codes.
+- CI uses `chordchart release-check` as the authoritative gate, which already
+  includes snapshot verification. See `docs/ci.md` for local/CI parity.
 
 Schema changes are contract changes and must be covered by tests. If a schema
 change intentionally breaks compatibility, document the migration path before

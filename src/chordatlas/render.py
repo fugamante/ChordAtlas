@@ -4,7 +4,13 @@ from collections.abc import Iterable
 from typing import Any, Literal
 
 from chordatlas.chords import COMMON_CHORD_SHAPES
-from chordatlas.compare import claim_label, comparison_to_mapping, counts_label
+from chordatlas.compare import (
+    category_display_labels,
+    claim_label,
+    comparison_to_mapping,
+    counts_label,
+    recording_display_labels,
+)
 from chordatlas.models import (
     ChartMeasure,
     ChordShape,
@@ -30,7 +36,7 @@ _UNCERTAIN_STATUSES = {
 
 
 def render_chord_shape(shape: ChordShape) -> str:
-    string_names = ("e", "B", "G", "D", "A", "E")
+    string_names = tuple(reversed(shape.tuning))
     high_to_low_frets = tuple(reversed(shape.frets))
     return "\n".join(
         f"{string}|--{fret}--" for string, fret in zip(string_names, high_to_low_frets, strict=True)
@@ -313,20 +319,34 @@ def _recording_comparison_lines(chart: SongChart, *, markdown: bool) -> list[str
         lines.append("RECORDING SOURCE COMPARISON")
         lines.append(DIVIDER)
     lines.append("")
+    recording_labels = recording_display_labels(
+        (recording["id"], recording["title"]) for recording in data["recordings"]
+    )
+    category_labels = category_display_labels(
+        (category["category"], category["label"]) for category in data["categories"]
+    )
     lines.extend(_recording_summary_lines(data, markdown=markdown))
     lines.append("")
 
     for category in data["categories"]:
-        lines.append(f"### {category['label']}" if markdown else category["label"])
+        label = category_labels[category["category"]]
+        lines.append(f"### {label}" if markdown else label)
         for recording in category["recordings"]:
-            lines.append(f"#### {recording['title']}" if markdown else recording["title"])
+            label = recording_labels[recording["id"]]
+            lines.append(f"#### {label}" if markdown else label)
             claims = recording["claims"]
             if claims:
                 lines.extend(f"- {claim_label(claim)}" for claim in claims)
             else:
                 lines.append("- No scoped recording-note claims.")
             lines.append("")
-        lines.extend(_recording_difference_lines(category, markdown=markdown))
+        lines.extend(
+            _recording_difference_lines(
+                category,
+                markdown=markdown,
+                recording_labels=recording_labels,
+            )
+        )
         lines.append("")
     return _strip_trailing_blank(lines)
 
@@ -334,9 +354,13 @@ def _recording_comparison_lines(chart: SongChart, *, markdown: bool) -> list[str
 def _recording_summary_lines(data: dict[str, Any], *, markdown: bool) -> list[str]:
     summary = data["summary"]
     lines = ["### Summary" if markdown else "Summary"]
+    category_labels = category_display_labels(
+        (category["category"], category["label"])
+        for category in summary["categories"]
+    )
     for category in summary["categories"]:
         line = (
-            f"{category['label']}: "
+            f"{category_labels[category['category']]}: "
             f"{category['shared_count']} shared, "
             f"{category['source_specific_count']} source-specific"
         )
@@ -346,22 +370,31 @@ def _recording_summary_lines(data: dict[str, Any], *, markdown: bool) -> list[st
 
     lines.append("")
     lines.append("By source:")
+    recording_labels = recording_display_labels(
+        (recording["id"], recording["title"])
+        for recording in summary["recordings"]
+    )
     for recording in summary["recordings"]:
         lines.append(
-            f"- {recording['title']}: {recording['claim_count']} claims, "
+            f"- {recording_labels[recording['id']]}: {recording['claim_count']} claims, "
             f"{recording['source_specific_count']} source-specific"
         )
     return lines
 
 
-def _recording_difference_lines(category: dict[str, Any], *, markdown: bool) -> list[str]:
+def _recording_difference_lines(
+    category: dict[str, Any],
+    *,
+    markdown: bool,
+    recording_labels: dict[str, str],
+) -> list[str]:
     lines = ["#### Differences" if markdown else "Differences"]
     if not category["differences"]:
         lines.append("- No source-specific differences in scoped recording notes.")
         return lines
 
     for difference in category["differences"]:
-        lines.append(f"- {difference['title']}:")
+        lines.append(f"- {recording_labels[difference['recording_id']]}:")
         lines.extend(f"  - {claim_label(claim)}" for claim in difference["claims"])
     return lines
 
@@ -376,7 +409,7 @@ def _recording_group_lines(
     scope = _recording_scope(group.recording_ids, recordings)
     title = group.name + (f" [{scope}]" if scope else "")
     lines = [f"### {title}" if markdown else title]
-    if group.value:
+    if group.value is not None:
         lines.extend(
             _recording_note_lines(
                 group.value,
@@ -424,8 +457,10 @@ def _recording_scope(
 ) -> str:
     if not recording_ids:
         return ""
-    titles_by_id = {recording.id: recording.title for recording in recordings}
-    return ", ".join(titles_by_id.get(recording_id, recording_id) for recording_id in recording_ids)
+    labels_by_id = recording_display_labels(
+        (recording.id, recording.title) for recording in recordings
+    )
+    return ", ".join(labels_by_id.get(recording_id, recording_id) for recording_id in recording_ids)
 
 
 def _recording_note_suffix(note: RecordingNote, provenance_mode: ProvenanceMode) -> str:

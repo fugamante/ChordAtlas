@@ -1,0 +1,49 @@
+{
+  "fixture_schema_version": "1.0.0",
+  "authorization": {
+    "author": "ChordAtlas Maintainers",
+    "license": "CC0-1.0",
+    "redistributable": true,
+    "source_kind": "project-authored abstract timeline"
+  },
+  "timebase": {
+    "unit": "sample_frame",
+    "sample_rate": 1000,
+    "duration_frames": 3000
+  },
+  "segments": [
+    {
+      "range": {
+        "start_frame": 0,
+        "end_frame": 1000
+      },
+      "primary": "C:maj",
+      "alternate": "A:min"
+    },
+    {
+      "range": {
+        "start_frame": 1000,
+        "end_frame": 2000
+      },
+      "primary": "G:maj",
+      "alternate": "C:maj"
+    },
+    {
+      "range": {
+        "start_frame": 2000,
+        "end_frame": 3000
+      },
+      "primary": "A:min"
+    }
+  ],
+  "reference_review": {
+    "operations": [
+      "select_candidate",
+      "move_boundary",
+      "accept_current",
+      "add_section"
+    ],
+    "elapsed_ms": 45000,
+    "interpretation": "Deterministic evaluation input, not observed musician effort."
+  }
+}

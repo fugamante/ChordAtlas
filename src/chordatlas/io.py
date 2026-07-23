@@ -9,17 +9,94 @@ import yaml
 from chordatlas.models import SongChart
 
 
+class _DuplicateKeyError(yaml.YAMLError):
+    def __init__(self, key: object, line: int) -> None:
+        self.key = key
+        self.line = line
+
+
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    def get_single_data(self) -> Any:
+        node = self.get_single_node()
+        if node is None:
+            return None
+        duplicates: list[_DuplicateKeyError] = []
+        self._collect_duplicates(node, duplicates=duplicates, visited=set())
+        if duplicates:
+            raise min(duplicates, key=lambda error: error.line)
+        return self.construct_document(node)
+
+    def _collect_duplicates(
+        self,
+        node: yaml.Node,
+        *,
+        duplicates: list[_DuplicateKeyError],
+        visited: set[int],
+    ) -> None:
+        identity = id(node)
+        if identity in visited:
+            return
+        visited.add(identity)
+        if isinstance(node, yaml.MappingNode):
+            seen: set[object] = set()
+            merge_seen = False
+            for key_node, value_node in node.value:
+                if key_node.tag == "tag:yaml.org,2002:merge":
+                    if merge_seen:
+                        duplicates.append(
+                            _DuplicateKeyError("<<", key_node.start_mark.line + 1)
+                        )
+                    merge_seen = True
+                else:
+                    key = self.construct_object(key_node, deep=False)
+                    try:
+                        if key in seen:
+                            duplicates.append(
+                                _DuplicateKeyError(key, key_node.start_mark.line + 1)
+                            )
+                        seen.add(key)
+                    except TypeError:
+                        # The standard safe constructor reports invalid unhashable keys.
+                        pass
+                self._collect_duplicates(
+                    key_node,
+                    duplicates=duplicates,
+                    visited=visited,
+                )
+                self._collect_duplicates(
+                    value_node,
+                    duplicates=duplicates,
+                    visited=visited,
+                )
+        elif isinstance(node, yaml.SequenceNode):
+            for item in node.value:
+                self._collect_duplicates(
+                    item,
+                    duplicates=duplicates,
+                    visited=visited,
+                )
+
+
 def load_song_chart(path: str | Path) -> SongChart:
     source = Path(path)
-    with source.open("r", encoding="utf-8") as handle:
-        data: Any = yaml.safe_load(handle)
+    try:
+        with source.open("r", encoding="utf-8") as handle:
+            data: Any = yaml.load(handle, Loader=_UniqueKeySafeLoader)
+    except _DuplicateKeyError as error:
+        raise ValueError(
+            f"Duplicate YAML key {error.key!r} in {source} at line {error.line}"
+        ) from None
+    except RecursionError:
+        raise ValueError(f"YAML in {source} exceeds the safe nesting depth") from None
+    except yaml.YAMLError:
+        raise ValueError(f"Invalid YAML in {source}") from None
     if not isinstance(data, dict):
         raise ValueError(f"Expected YAML mapping in {source}")
     return SongChart.from_mapping(data)
 
 
 def song_chart_to_json(chart: SongChart, *, indent: int = 2) -> str:
-    return json.dumps(chart.to_mapping(), indent=indent, sort_keys=True) + "\n"
+    return json.dumps(chart.to_mapping(), indent=indent, sort_keys=True, allow_nan=False) + "\n"
 
 
 def example_song_yaml() -> str:

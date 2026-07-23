@@ -1,0 +1,15 @@
+{
+  "fixture_policy": "generated-in-test-only",
+  "fixtures": [
+    {
+      "generator": "tests/test_acquisition_stage5.py::synthetic_wav",
+      "license": "MIT",
+      "purpose": "Deterministic direct-media acquisition and publication"
+    }
+  ],
+  "review": {
+    "contains_copyrighted_lyrics": false,
+    "contains_third_party_recording": false,
+    "redistribution_authorized": true
+  }
+}

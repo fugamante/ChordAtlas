@@ -9,9 +9,14 @@ WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 PUBLISH_WORKFLOW = ROOT / ".github" / "workflows" / "publish.yml"
 
 
-def test_ci_runs_snapshot_json_check_with_annotations_and_artifacts() -> None:
+def test_ci_runs_release_validation_with_pinned_actions() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
+    assert 'python-version: "3.11"' in workflow
+    assert 'python -m pip install -e ".[dev]"' in workflow
+    assert "chordchart schemas --check" in workflow
+    assert "chordchart release-check" in workflow
+    assert "python -m pytest" not in workflow
     assert "chordchart snapshots check --format json --diff-dir snapshot-diffs" in workflow
     assert "> snapshot-result.json" in workflow
     assert 'for filename in payload["drift_files"]' in workflow
@@ -20,7 +25,7 @@ def test_ci_runs_snapshot_json_check_with_annotations_and_artifacts() -> None:
     assert "if-no-files-found: ignore" in workflow
 
     install_step = re.search(
-        r"- name: Install project\n(?P<body>.*?)(?=\n\s+- name: Run tests)",
+        r"- name: Install project\n(?P<body>.*?)(?=\n\s+- name: Check schema mirror)",
         workflow,
         re.DOTALL,
     )
@@ -50,6 +55,18 @@ def test_ci_runs_snapshot_json_check_with_annotations_and_artifacts() -> None:
     upload_pin = re.search(r"actions/upload-artifact@([0-9a-f]{40})", workflow)
     assert upload_pin is not None
     assert "<PINNED_UPLOAD_ARTIFACT_SHA>" not in workflow
+
+    checkout_pin = re.search(
+        r"# actions/checkout v\d+\.\d+\.\d+\s*\n\s+uses: actions/checkout@([0-9a-f]{40})",
+        workflow,
+    )
+    setup_python_pin = re.search(
+        r"# actions/setup-python v\d+\.\d+\.\d+\s*\n\s+uses: actions/setup-python@([0-9a-f]{40})",
+        workflow,
+    )
+    assert checkout_pin is not None
+    assert setup_python_pin is not None
+    assert "@v" not in workflow
 
 
 def test_publish_workflow_is_release_and_environment_gated() -> None:
