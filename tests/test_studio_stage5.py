@@ -253,7 +253,7 @@ def test_direct_media_reaches_reviewed_songchart_exports_without_locator(
             cookie,
             f"/api/review-sessions/{review['session']['session_id']}/promotion-preview",
             preview_payload,
-            **{"If-Match": f'"{review['head']['token']}"'},
+            **{"If-Match": '"{}"'.format(review["head"]["token"])},
         )
         assert status == HTTPStatus.OK, body
         preview = json.loads(body)["preview"]
@@ -272,7 +272,7 @@ def test_direct_media_reaches_reviewed_songchart_exports_without_locator(
                 "acknowledged_issue_ids": material,
             },
             **{
-                "If-Match": f'"{review['head']['token']}"',
+                "If-Match": '"{}"'.format(review["head"]["token"]),
                 "Idempotency-Key": "stage5-e2e-approval",
             },
         )
