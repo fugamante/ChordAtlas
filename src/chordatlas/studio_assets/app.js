@@ -135,6 +135,7 @@
   let acquisitions = [];
   let currentAcquisition = null;
   let acquisitionPoll = null;
+  let pendingAcquisitionRequest = null;
   let active = null;
   let waveform = null;
   let sampleRate = 1;
@@ -185,6 +186,7 @@
     if (!response.ok) {
       const error = new Error(payload.error?.message || "The local request failed.");
       error.code = payload.error?.code || "request_failed";
+      error.durableResolution = true;
       throw error;
     }
     return payload;
@@ -274,6 +276,22 @@
   const setAcquisitionStatus = (message, kind = "neutral") => {
     acquisitionStatus.textContent = message;
     acquisitionStatus.dataset.kind = kind;
+  };
+
+  const acquisitionRequestKey = (url, displayName, authorizationConfirmed) => {
+    const unchanged = pendingAcquisitionRequest
+      && pendingAcquisitionRequest.url === url
+      && pendingAcquisitionRequest.displayName === displayName
+      && pendingAcquisitionRequest.authorizationConfirmed === authorizationConfirmed;
+    if (!unchanged) {
+      pendingAcquisitionRequest = {
+        url,
+        displayName,
+        authorizationConfirmed,
+        key: `acquire-${crypto.randomUUID()}`,
+      };
+    }
+    return pendingAcquisitionRequest.key;
   };
 
   const loadAcquisitions = async (preferredId = null) => {
@@ -393,19 +411,26 @@
     setAcquisitionStatus("Recording authorization before contacting the source…");
     const displayName = remoteName.value.trim();
     const url = remoteUrl.value.trim();
+    const authorizationConfirmed = remoteAuthorization.checked;
+    const idempotencyKey = acquisitionRequestKey(
+      url,
+      displayName,
+      authorizationConfirmed
+    );
     try {
       const value = await request("/api/acquisitions", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Idempotency-Key": `acquire-${crypto.randomUUID()}`,
+          "Idempotency-Key": idempotencyKey,
         },
         body: JSON.stringify({
           url,
           display_name: displayName,
-          authorization_confirmed: remoteAuthorization.checked,
+          authorization_confirmed: authorizationConfirmed,
         }),
       });
+      pendingAcquisitionRequest = null;
       remoteUrl.value = "";
       remoteAuthorization.checked = false;
       remoteUrl.type = "password";
@@ -418,6 +443,7 @@
         200
       );
     } catch (error) {
+      if (error.durableResolution) pendingAcquisitionRequest = null;
       setAcquisitionStatus(error.message, "error");
       acquisitionStatus.focus();
     } finally {

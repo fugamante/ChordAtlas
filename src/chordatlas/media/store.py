@@ -5,13 +5,13 @@ import json
 import os
 import secrets
 import stat
-import tempfile
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO
 
+from chordatlas._fs import ProjectAnchor, TargetOccupiedError, create_text_exclusive
 from chordatlas.media.models import (
     LocalLocator,
     MediaAsset,
@@ -24,7 +24,9 @@ from chordatlas.media.models import (
 from chordatlas.media.wav import (
     MAX_WAVEFORM_BUCKETS,
     build_waveform,
+    build_waveform_stream,
     inspect_pcm16_wav,
+    inspect_pcm16_wav_stream,
     waveform_bucket_frames,
 )
 
@@ -53,13 +55,15 @@ class ProjectMediaStore:
         self.cache_root = self.root / "cache"
         self.waveforms_root = self.root / "cache" / "waveforms"
         self.tmp_root = self.root / "tmp"
+        self._anchor: ProjectAnchor | None = None
         self._publish_lock = threading.Lock()
 
     @classmethod
     def initialize(cls, project_root: Path) -> ProjectMediaStore:
         store = cls(project_root)
+        _ensure_private_directory(store.root)
+        store._anchor = ProjectAnchor(store.root)
         for path in (
-            store.root,
             store.media_root,
             store.blobs_base,
             store.blobs_root,
@@ -79,8 +83,9 @@ class ProjectMediaStore:
     @classmethod
     def open(cls, project_root: Path) -> ProjectMediaStore:
         store = cls(project_root)
+        _require_private_directory(store.root)
+        store._anchor = ProjectAnchor(store.root)
         for path in (
-            store.root,
             store.media_root,
             store.blobs_base,
             store.blobs_root,
@@ -106,6 +111,7 @@ class ProjectMediaStore:
         authorization_confirmed: bool,
         max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
     ) -> tuple[SourceReference, MediaAsset]:
+        self._require_anchor()
         if not authorization_confirmed:
             raise MediaImportError(
                 "authorization_required",
@@ -120,23 +126,25 @@ class ProjectMediaStore:
                 f"The file exceeds the {max_upload_bytes // (1024 * 1024)} MiB limit.",
             )
         stage_path = self._allocate_stage()
+        stage_handle = None
         written = 0
         try:
-            with stage_path.open("wb") as handle:
-                os.chmod(stage_path, 0o600)
-                remaining = byte_length
-                while remaining:
-                    payload = stream.read(min(_CHUNK_BYTES, remaining))
-                    if not payload:
-                        raise MediaImportError(
-                            "upload_truncated",
-                            "The upload ended before the declared file length.",
-                        )
-                    handle.write(payload)
-                    written += len(payload)
-                    remaining -= len(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
+            stage_handle = self.open_private_stage(stage_path, writable=True)
+            stage_handle.seek(0)
+            stage_handle.truncate(0)
+            remaining = byte_length
+            while remaining:
+                payload = stream.read(min(_CHUNK_BYTES, remaining))
+                if not payload:
+                    raise MediaImportError(
+                        "upload_truncated",
+                        "The upload ended before the declared file length.",
+                    )
+                stage_handle.write(payload)
+                written += len(payload)
+                remaining -= len(payload)
+            stage_handle.flush()
+            os.fsync(stage_handle.fileno())
 
             if written != byte_length:
                 raise MediaImportError("upload_truncated", "The upload length is inconsistent.")
@@ -155,17 +163,68 @@ class ProjectMediaStore:
                     private_locator=f"browser-upload:{safe_name}",
                 ),
                 max_upload_bytes=max_upload_bytes,
+                stage_handle=stage_handle,
             )
         finally:
-            try:
-                stage_path.unlink()
-            except FileNotFoundError:
-                pass
+            if stage_handle is not None:
+                stage_handle.close()
+            self.discard_private_stage(stage_path)
 
     def allocate_private_stage(self) -> Path:
         """Allocate a private project stage for a supervised ingestion adapter."""
 
+        self._require_anchor()
         return self._allocate_stage()
+
+    def open_private_stage(self, stage_path: Path, *, writable: bool) -> BinaryIO:
+        """Pin one private staging file so writers cannot follow path replacement."""
+
+        anchor = self._required_anchor()
+        relative = anchor.relative(stage_path)
+        if (
+            relative.parent != anchor.relative(self.tmp_root)
+            or not relative.name.startswith(".upload-")
+            or not relative.name.endswith(".tmp")
+        ):
+            raise MediaImportError(
+                "unsafe_storage_path",
+                "The staged media file is outside project-private storage.",
+                retryable=False,
+            )
+        descriptor = -1
+        try:
+            with anchor.parent(stage_path) as (parent_fd, leaf):
+                descriptor = os.open(
+                    leaf,
+                    (os.O_RDWR if writable else os.O_RDONLY)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_fd,
+                )
+                named = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+            entry = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(entry.st_mode)
+                or entry.st_uid != os.getuid()
+                or stat.S_IMODE(entry.st_mode) != 0o600
+                or entry.st_nlink != 1
+                or (entry.st_dev, entry.st_ino) != (named.st_dev, named.st_ino)
+            ):
+                raise _integrity_error()
+            handle = os.fdopen(descriptor, "r+b" if writable else "rb")
+            descriptor = -1
+            return handle
+        except MediaImportError:
+            raise
+        except OSError:
+            raise _integrity_error() from None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    def discard_private_stage(self, stage_path: Path) -> None:
+        """Remove only the anchored staging name; never follow a replaced ancestor."""
+
+        self._unlink_private_file(stage_path)
 
     def publish_staged_file(
         self,
@@ -178,9 +237,11 @@ class ProjectMediaStore:
         locator: LocalLocator | RemoteLocator,
         expected_asset_id: str | None = None,
         max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
+        stage_handle: BinaryIO | None = None,
     ) -> tuple[SourceReference, MediaAsset]:
         """Validate and atomically publish a complete private PCM16-WAV stage."""
 
+        self._require_anchor()
         if not authorization_confirmed:
             raise MediaImportError(
                 "authorization_required",
@@ -200,33 +261,43 @@ class ProjectMediaStore:
                 "upload_too_large",
                 f"The file exceeds the {max_upload_bytes // (1024 * 1024)} MiB limit.",
             )
-        resolved_stage = stage_path.resolve(strict=True)
-        if resolved_stage.parent != self.tmp_root.resolve(strict=True):
-            raise MediaImportError(
-                "unsafe_storage_path",
-                "The staged media file is outside project-private storage.",
-                retryable=False,
+        owns_handle = stage_handle is None
+        handle = stage_handle or self.open_private_stage(stage_path, writable=False)
+        try:
+            return self._publish_staged_handle(
+                stage_path,
+                handle,
+                byte_length=byte_length,
+                display_name=display_name,
+                source_id=source_id,
+                locator=locator,
+                expected_asset_id=expected_asset_id,
             )
-        if stage_path.is_symlink() or not stage_path.is_file():
-            raise _integrity_error()
-        _require_private_file(stage_path)
-        stage_entry = stage_path.stat()
-        if stage_entry.st_nlink != 1:
-            raise _integrity_error()
-        if stage_entry.st_size != byte_length:
-            raise MediaImportError("upload_truncated", "The upload length is inconsistent.")
-        stage_identity = (
-            stage_entry.st_dev,
-            stage_entry.st_ino,
-            stage_entry.st_mtime_ns,
-            stage_entry.st_ctime_ns,
-        )
+        finally:
+            if owns_handle:
+                handle.close()
 
+    def _publish_staged_handle(
+        self,
+        stage_path: Path,
+        handle: BinaryIO,
+        *,
+        byte_length: int,
+        display_name: str,
+        source_id: str,
+        locator: LocalLocator | RemoteLocator,
+        expected_asset_id: str | None,
+    ) -> tuple[SourceReference, MediaAsset]:
+        stage_identity = self._require_stage_handle_identity(
+            stage_path,
+            handle,
+            byte_length,
+        )
         digest = hashlib.sha256()
-        with stage_path.open("rb") as handle:
-            for payload in iter(lambda: handle.read(_CHUNK_BYTES), b""):
-                digest.update(payload)
-        _require_stage_identity(stage_path, stage_identity, byte_length)
+        handle.seek(0)
+        for payload in iter(lambda: handle.read(_CHUNK_BYTES), b""):
+            digest.update(payload)
+        self._require_stage_handle_identity(stage_path, handle, byte_length)
         hex_digest = digest.hexdigest()
         asset_id = f"sha256:{hex_digest}"
         if expected_asset_id is not None and asset_id != expected_asset_id:
@@ -235,12 +306,11 @@ class ProjectMediaStore:
                 "The private acquisition stage changed during validation.",
                 retryable=False,
             )
-        _require_stage_identity(stage_path, stage_identity, byte_length)
-        info = inspect_pcm16_wav(stage_path)
-        _require_stage_identity(stage_path, stage_identity, byte_length)
+        info = inspect_pcm16_wav_stream(handle, file_size=byte_length)
+        self._require_stage_handle_identity(stage_path, handle, byte_length)
         bucket_frames = waveform_bucket_frames(info.duration_frames)
-        waveform = build_waveform(stage_path, info, bucket_frames=bucket_frames)
-        _require_stage_identity(stage_path, stage_identity, byte_length)
+        waveform = build_waveform_stream(handle, info, bucket_frames=bucket_frames)
+        self._require_stage_handle_identity(stage_path, handle, byte_length)
 
         with self._publish_lock:
             blob_path = self._blob_path(hex_digest, create_parent=True)
@@ -260,7 +330,11 @@ class ProjectMediaStore:
                     stage_identity=stage_identity,
                 )
                 if not stage_consumed:
-                    _require_stage_identity(stage_path, stage_identity, byte_length)
+                    self._require_stage_handle_identity(
+                        stage_path,
+                        handle,
+                        byte_length,
+                    )
                 asset = MediaAsset(
                     id=asset_id,
                     sha256=hex_digest,
@@ -302,7 +376,52 @@ class ProjectMediaStore:
             )
         return source, asset
 
+    def _require_stage_handle_identity(
+        self,
+        stage_path: Path,
+        handle: BinaryIO,
+        byte_length: int,
+    ) -> tuple[int, int, int, int]:
+        anchor = self._required_anchor()
+        entry = os.fstat(handle.fileno())
+        try:
+            with anchor.parent(stage_path) as (parent_fd, leaf):
+                named = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError:
+            raise MediaImportError(
+                "stage_identity_changed",
+                "The private acquisition stage changed during validation.",
+                retryable=False,
+            ) from None
+        identity = (
+            entry.st_dev,
+            entry.st_ino,
+            entry.st_mtime_ns,
+            entry.st_ctime_ns,
+        )
+        if (
+            not stat.S_ISREG(entry.st_mode)
+            or entry.st_uid != os.getuid()
+            or stat.S_IMODE(entry.st_mode) != 0o600
+            or entry.st_nlink != 1
+            or entry.st_size != byte_length
+            or identity
+            != (
+                named.st_dev,
+                named.st_ino,
+                named.st_mtime_ns,
+                named.st_ctime_ns,
+            )
+        ):
+            raise MediaImportError(
+                "stage_identity_changed",
+                "The private acquisition stage changed during validation.",
+                retryable=False,
+            )
+        return identity
+
     def list_public_sources(self) -> list[dict[str, Any]]:
+        self._require_anchor()
         values = []
         for path in sorted(self.sources_root.glob("src_*.json")):
             if path.is_symlink() or not path.is_file():
@@ -327,6 +446,7 @@ class ProjectMediaStore:
         return values
 
     def source(self, source_id: str) -> SourceReference:
+        self._require_anchor()
         _validate_source_id(source_id)
         path = self.sources_root / f"{source_id}.json"
         try:
@@ -337,6 +457,7 @@ class ProjectMediaStore:
             raise _integrity_error() from None
 
     def asset_for_source(self, source_id: str) -> MediaAsset:
+        self._require_anchor()
         source = self.source(source_id)
         digest = _asset_digest(source.asset_id)
         manifest_path = self._manifest_path(digest)
@@ -351,23 +472,71 @@ class ProjectMediaStore:
         return asset
 
     def audio_path_for_source(self, source_id: str) -> Path:
+        self._require_anchor()
         asset = self.asset_for_source(source_id)
         return self._blob_path(asset.sha256)
 
+    def open_audio_for_source(
+        self,
+        source_id: str,
+        *,
+        expected_asset_id: str | None = None,
+    ) -> tuple[MediaAsset, BinaryIO]:
+        """Return one verified descriptor that remains authoritative until closed."""
+
+        self._require_anchor()
+        asset = self.asset_for_source(source_id)
+        if expected_asset_id is not None and asset.id != expected_asset_id:
+            raise _integrity_error()
+        path = self._blob_path(asset.sha256)
+        anchor = self._required_anchor()
+        descriptor = -1
+        try:
+            with anchor.parent(path) as (parent_fd, leaf):
+                descriptor = os.open(
+                    leaf,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_fd,
+                )
+                named = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError:
+            if descriptor >= 0:
+                os.close(descriptor)
+            raise _integrity_error() from None
+        try:
+            self._verify_blob_descriptor(
+                descriptor,
+                named,
+                asset.sha256,
+                asset.byte_length,
+            )
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            return asset, os.fdopen(descriptor, "rb")
+        except Exception:
+            os.close(descriptor)
+            raise
+
     def waveform_for_source(self, source_id: str) -> Waveform:
+        self._require_anchor()
         asset = self.asset_for_source(source_id)
         bucket_frames = waveform_bucket_frames(asset.duration_frames)
         path = self._waveform_path(asset.sha256, bucket_frames=bucket_frames)
         if not path.exists():
-            info = inspect_pcm16_wav(self._blob_path(asset.sha256))
-            self._publish_waveform(
-                path,
-                build_waveform(
-                    self._blob_path(asset.sha256),
+            opened_asset, handle = self.open_audio_for_source(
+                source_id,
+                expected_asset_id=asset.id,
+            )
+            with handle:
+                info = inspect_pcm16_wav_stream(
+                    handle,
+                    file_size=opened_asset.byte_length,
+                )
+                waveform = build_waveform_stream(
+                    handle,
                     info,
                     bucket_frames=bucket_frames,
-                ),
-            )
+                )
+            self._publish_waveform(path, waveform)
         try:
             value = self._read_json(path)
             timebase_value = value["timebase"]
@@ -404,97 +573,99 @@ class ProjectMediaStore:
         return waveform
 
     def prune_waveform_cache(self, source_id: str) -> bool:
+        self._require_anchor()
         asset = self.asset_for_source(source_id)
         path = self._waveform_path(
             asset.sha256,
             bucket_frames=waveform_bucket_frames(asset.duration_frames),
         )
-        if path.is_symlink():
-            raise MediaImportError(
-                "storage_integrity",
-                "The waveform cache failed an integrity check.",
-                retryable=False,
-            )
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            return False
-        return True
+        return self._unlink_private_file(path)
 
     def forget_remote_locator(self, source_id: str) -> bool:
         """Remove a Stage 5 URL without deleting its source or immutable media."""
 
+        self._require_anchor()
         _validate_source_id(source_id)
         path = self.locators_root / f"{source_id}.json"
-        if not path.exists():
-            return False
-        value = self._read_json(path)
+        try:
+            value = self._read_json(path)
+        except MediaImportError:
+            if not self._anchored_exists(path):
+                return False
+            raise
         if value.get("source_id") != source_id or value.get("channel") != "direct_https":
             raise _integrity_error()
-        path.unlink()
-        _sync_directory(path.parent)
+        if not self._unlink_private_file(path):
+            return False
         return True
 
     def _allocate_stage(self) -> Path:
-        _require_private_directory(self.tmp_root)
-        descriptor, name = tempfile.mkstemp(prefix=".upload-", suffix=".tmp", dir=self.tmp_root)
-        os.close(descriptor)
-        path = Path(name)
-        os.chmod(path, 0o600)
-        return path
+        anchor = self._required_anchor()
+        with anchor.directory(anchor.relative(self.tmp_root)) as parent_fd:
+            for _ in range(16):
+                leaf = f".upload-{secrets.token_hex(8)}.tmp"
+                try:
+                    descriptor = os.open(
+                        leaf,
+                        os.O_CREAT | os.O_EXCL | os.O_RDWR,
+                        0o600,
+                        dir_fd=parent_fd,
+                    )
+                except FileExistsError:
+                    continue
+                try:
+                    os.fchmod(descriptor, 0o600)
+                except BaseException:
+                    os.close(descriptor)
+                    descriptor = -1
+                    os.unlink(leaf, dir_fd=parent_fd)
+                    os.fsync(parent_fd)
+                    raise
+                finally:
+                    if descriptor >= 0:
+                        os.close(descriptor)
+                return self.tmp_root / leaf
+        raise MediaImportError(
+            "storage_integrity",
+            "Project media storage failed an integrity check.",
+            retryable=False,
+        )
 
     def _ensure_storage_ignore(self) -> None:
         path = self.root / ".gitignore"
         expected = "*\n!.gitignore\n"
         if path.exists():
-            if path.is_symlink() or not path.is_file():
-                raise _integrity_error()
-            _require_private_file(path)
-            if path.read_text(encoding="utf-8") != expected:
+            if self._read_text(path) != expected:
                 raise _integrity_error()
             return
         self._publish_json_text_exclusive(path, expected)
 
     def _publish_json_text_exclusive(self, path: Path, payload: str) -> None:
-        descriptor, name = tempfile.mkstemp(prefix=".record-", suffix=".tmp", dir=self.tmp_root)
-        stage_path = Path(name)
         try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                os.fchmod(handle.fileno(), 0o600)
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            try:
-                os.link(stage_path, path, follow_symlinks=False)
-                _sync_directory(path.parent)
-            except FileExistsError:
-                if path.is_symlink() or not path.is_file():
-                    raise _integrity_error() from None
-                _require_private_file(path)
-                if path.read_text(encoding="utf-8") != payload:
-                    raise _integrity_error() from None
-        finally:
-            try:
-                stage_path.unlink()
-            except FileNotFoundError:
-                pass
+            create_text_exclusive(
+                path,
+                payload,
+                stage_prefix=".record-",
+                mode=0o600,
+                sync_directory=True,
+                anchor=self._required_anchor(),
+            )
+        except TargetOccupiedError:
+            if self._read_text(path) != payload:
+                raise _integrity_error() from None
+        except OSError:
+            raise _integrity_error() from None
 
     def _blob_path(self, digest: str, *, create_parent: bool = False) -> Path:
         _validate_digest(digest)
         parent = self.blobs_root / digest[:2]
-        if create_parent:
-            _ensure_private_directory(parent)
-        else:
-            _require_private_directory(parent)
+        self._require_private_parent(parent, create=create_parent)
         return parent / f"{digest}.wav"
 
     def _manifest_path(self, digest: str, *, create_parent: bool = False) -> Path:
         _validate_digest(digest)
         parent = self.manifests_root / digest[:2]
-        if create_parent:
-            _ensure_private_directory(parent)
-        else:
-            _require_private_directory(parent)
+        self._require_private_parent(parent, create=create_parent)
         return parent / f"{digest}.json"
 
     def _waveform_path(
@@ -506,11 +677,18 @@ class ProjectMediaStore:
     ) -> Path:
         _validate_digest(digest)
         parent = self.waveforms_root / digest[:2]
-        if create_parent:
-            _ensure_private_directory(parent)
-        else:
-            _require_private_directory(parent)
+        self._require_private_parent(parent, create=create_parent)
         return parent / f"{digest}.pcm16-folded-peak-v1-{bucket_frames}.json"
+
+    def _require_private_parent(self, parent: Path, *, create: bool) -> None:
+        try:
+            with self._required_anchor().directory(
+                self._required_anchor().relative(parent),
+                create=create,
+            ):
+                pass
+        except OSError:
+            raise _integrity_error() from None
 
     def _load_existing_asset(
         self,
@@ -542,50 +720,153 @@ class ProjectMediaStore:
         *,
         stage_identity: tuple[int, int, int, int],
     ) -> bool:
+        anchor = self._required_anchor()
         try:
-            os.link(stage_path, blob_path, follow_symlinks=False)
-            _sync_directory(blob_path.parent)
+            with (
+                anchor.parent(stage_path) as (stage_fd, stage_leaf),
+                anchor.parent(blob_path) as (blob_fd, blob_leaf),
+            ):
+                os.link(
+                    stage_leaf,
+                    blob_leaf,
+                    src_dir_fd=stage_fd,
+                    dst_dir_fd=blob_fd,
+                    follow_symlinks=False,
+                )
+                os.fsync(blob_fd)
         except FileExistsError:
             self._verify_blob(blob_path, digest, byte_length)
             return False
-        blob_entry = blob_path.stat()
-        if (blob_entry.st_dev, blob_entry.st_ino) != stage_identity[:2]:
-            blob_path.unlink()
-            _sync_directory(blob_path.parent)
-            raise MediaImportError(
-                "stage_identity_changed",
-                "The private acquisition stage changed during publication.",
-                retryable=False,
-            )
-        stage_path.unlink()
-        _sync_directory(stage_path.parent)
+        try:
+            with (
+                anchor.parent(stage_path) as (stage_fd, stage_leaf),
+                anchor.parent(blob_path) as (blob_fd, blob_leaf),
+            ):
+                blob_entry = os.stat(blob_leaf, dir_fd=blob_fd, follow_symlinks=False)
+                if (blob_entry.st_dev, blob_entry.st_ino) != stage_identity[:2]:
+                    os.unlink(blob_leaf, dir_fd=blob_fd)
+                    os.fsync(blob_fd)
+                    raise MediaImportError(
+                        "stage_identity_changed",
+                        "The private acquisition stage changed during publication.",
+                        retryable=False,
+                    )
+                os.unlink(stage_leaf, dir_fd=stage_fd)
+                os.fsync(stage_fd)
+        except OSError:
+            raise _integrity_error() from None
         try:
             self._verify_blob(blob_path, digest, byte_length)
         except Exception:
-            blob_path.unlink(missing_ok=True)
-            _sync_directory(blob_path.parent)
+            try:
+                with anchor.parent(blob_path) as (blob_fd, blob_leaf):
+                    os.unlink(blob_leaf, dir_fd=blob_fd)
+                    os.fsync(blob_fd)
+            except FileNotFoundError:
+                pass
             raise
         return True
 
     def _verify_blob(self, path: Path, digest: str, byte_length: int) -> None:
-        if path.is_symlink() or not path.is_file():
-            raise _integrity_error()
-        _require_private_file(path)
-        file_stat = path.stat()
+        anchor = self._required_anchor()
+        descriptor = -1
+        try:
+            with anchor.parent(path) as (parent_fd, leaf):
+                descriptor = os.open(
+                    leaf,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_fd,
+                )
+                named = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError:
+            if descriptor >= 0:
+                os.close(descriptor)
+            raise _integrity_error() from None
+        try:
+            self._verify_blob_descriptor(descriptor, named, digest, byte_length)
+        finally:
+            os.close(descriptor)
+
+    def _anchored_exists(self, path: Path) -> bool:
+        anchor = self._required_anchor()
+        try:
+            with anchor.parent(path) as (parent_fd, leaf):
+                os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        except OSError:
+            raise _integrity_error() from None
+        return True
+
+    def _unlink_private_file(self, path: Path) -> bool:
+        anchor = self._required_anchor()
+        descriptor = -1
+        try:
+            with anchor.parent(path) as (parent_fd, leaf):
+                try:
+                    descriptor = os.open(
+                        leaf,
+                        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=parent_fd,
+                    )
+                except FileNotFoundError:
+                    return False
+                entry = os.fstat(descriptor)
+                named = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+                if (
+                    not stat.S_ISREG(entry.st_mode)
+                    or entry.st_uid != os.getuid()
+                    or stat.S_IMODE(entry.st_mode) != 0o600
+                    or entry.st_nlink != 1
+                    or (entry.st_dev, entry.st_ino) != (named.st_dev, named.st_ino)
+                ):
+                    raise _integrity_error()
+                os.unlink(leaf, dir_fd=parent_fd)
+                os.fsync(parent_fd)
+        except MediaImportError:
+            raise
+        except OSError:
+            raise _integrity_error() from None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        return True
+
+    @staticmethod
+    def _verify_blob_descriptor(
+        descriptor: int,
+        named: os.stat_result,
+        digest: str,
+        byte_length: int,
+    ) -> None:
+        file_stat = os.fstat(descriptor)
         for _ in range(20):
             if file_stat.st_nlink == 1:
                 break
             time.sleep(0.001)
-            file_stat = path.stat()
-        if file_stat.st_nlink != 1:
-            raise _integrity_error()
-        if file_stat.st_size != byte_length:
+            file_stat = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(file_stat.st_mode)
+            or file_stat.st_uid != os.getuid()
+            or stat.S_IMODE(file_stat.st_mode) != 0o600
+            or file_stat.st_nlink != 1
+            or file_stat.st_size != byte_length
+            or (file_stat.st_dev, file_stat.st_ino)
+            != (named.st_dev, named.st_ino)
+        ):
             raise _integrity_error()
         observed = hashlib.sha256()
-        with path.open("rb") as handle:
-            for payload in iter(lambda: handle.read(_CHUNK_BYTES), b""):
-                observed.update(payload)
-        if observed.hexdigest() != digest:
+        while True:
+            payload = os.read(descriptor, _CHUNK_BYTES)
+            if not payload:
+                break
+            observed.update(payload)
+        after = os.fstat(descriptor)
+        if (
+            observed.hexdigest() != digest
+            or (file_stat.st_dev, file_stat.st_ino, file_stat.st_size)
+            != (after.st_dev, after.st_ino, after.st_size)
+        ):
             raise _integrity_error()
 
     def _publish_waveform(self, path: Path, waveform: Waveform) -> None:
@@ -608,35 +889,36 @@ class ProjectMediaStore:
         collision_code: str,
     ) -> None:
         payload = json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n"
-        descriptor, name = tempfile.mkstemp(prefix=".record-", suffix=".tmp", dir=self.tmp_root)
-        stage_path = Path(name)
         try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                os.fchmod(handle.fileno(), 0o600)
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            try:
-                os.link(stage_path, path, follow_symlinks=False)
-                _sync_directory(path.parent)
-            except FileExistsError:
-                if path.is_symlink() or self._read_json(path) != value:
-                    raise MediaImportError(
-                        collision_code,
-                        "Project media storage contains a conflicting immutable record.",
-                        retryable=False,
-                    ) from None
-        finally:
-            try:
-                stage_path.unlink()
-            except FileNotFoundError:
-                pass
+            create_text_exclusive(
+                path,
+                payload,
+                stage_prefix=".record-",
+                mode=0o600,
+                sync_directory=True,
+                anchor=self._required_anchor(),
+            )
+        except TargetOccupiedError:
+            if self._read_json(path) != value:
+                raise MediaImportError(
+                    collision_code,
+                    "Project media storage contains a conflicting immutable record.",
+                    retryable=False,
+                ) from None
+        except OSError:
+            raise _integrity_error() from None
 
     def _read_json(self, path: Path) -> dict[str, Any]:
         value = None
         for attempt in range(20):
             try:
-                descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                anchor = self._required_anchor()
+                with anchor.parent(path) as (parent_fd, leaf):
+                    descriptor = os.open(
+                        leaf,
+                        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=parent_fd,
+                    )
             except OSError:
                 raise _integrity_error() from None
             try:
@@ -667,6 +949,64 @@ class ProjectMediaStore:
         if not isinstance(value, dict):
             raise _integrity_error()
         return value
+
+    def _read_text(self, path: Path) -> str:
+        anchor = self._required_anchor()
+        descriptor = -1
+        try:
+            with anchor.parent(path) as (parent_fd, leaf):
+                descriptor = os.open(
+                    leaf,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_fd,
+                )
+            entry = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(entry.st_mode)
+                or entry.st_uid != os.getuid()
+                or stat.S_IMODE(entry.st_mode) != 0o600
+                or entry.st_nlink != 1
+                or entry.st_size > _MAX_RECORD_BYTES
+            ):
+                raise _integrity_error()
+            with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+                descriptor = -1
+                value = handle.read(_MAX_RECORD_BYTES + 1)
+        except (OSError, UnicodeError):
+            raise _integrity_error() from None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        if len(value.encode("utf-8")) > _MAX_RECORD_BYTES:
+            raise _integrity_error()
+        return value
+
+    def _required_anchor(self) -> ProjectAnchor:
+        if self._anchor is None:
+            raise _integrity_error()
+        return self._anchor
+
+    def _require_anchor(self) -> None:
+        try:
+            anchor = self._required_anchor()
+            anchor.verify()
+            for directory in (
+                self.media_root,
+                self.blobs_base,
+                self.blobs_root,
+                self.manifests_base,
+                self.manifests_root,
+                self.sources_root,
+                self.private_root,
+                self.locators_root,
+                self.cache_root,
+                self.waveforms_root,
+                self.tmp_root,
+            ):
+                with anchor.directory(anchor.relative(directory)):
+                    pass
+        except OSError:
+            raise _integrity_error() from None
 
     @staticmethod
     def _verify_info(asset: MediaAsset, info) -> None:

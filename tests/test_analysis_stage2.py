@@ -145,6 +145,54 @@ def test_baseline_produces_reproducible_genuine_hypotheses(tmp_path: Path) -> No
     assert metrics["scope"] == "deterministic_synthetic_fixture_only"
 
 
+def test_analysis_reopens_and_verifies_exact_media_before_worker_decode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = tmp_path / "source.wav"
+    timebase, _reference = write_progression(source_path)
+    payload = source_path.read_bytes()
+    media = ProjectMediaStore.initialize(tmp_path)
+    with source_path.open("rb") as handle:
+        source, asset = media.import_stream(
+            handle,
+            byte_length=len(payload),
+            display_name="source.wav",
+            authorization_confirmed=True,
+        )
+    service = AnalysisService(tmp_path)
+    entered = threading.Event()
+    proceed = threading.Event()
+    original_supervise = service._supervise
+
+    def delayed(job, source_id, spec) -> None:
+        entered.set()
+        assert proceed.wait(5)
+        original_supervise(job, source_id, spec)
+
+    monkeypatch.setattr(service, "_supervise", delayed)
+    run_id = service.start(source_id=source.id)
+    assert entered.wait(5)
+
+    replacement = tmp_path / "replacement.wav"
+    replacement_timebase, _ = write_progression(
+        replacement,
+        labels=("G:maj", "G:maj", "G:maj", "G:maj"),
+    )
+    assert replacement_timebase == timebase == asset.timebase
+    blob = media.audio_path_for_source(source.id)
+    os.replace(replacement, blob)
+    os.chmod(blob, 0o600)
+    proceed.set()
+
+    terminal = wait_terminal(service, run_id)
+    service.close()
+    assert terminal["status"] == "failed"
+    assert terminal["failure_code"] == "media_unavailable"
+    with pytest.raises(AnalysisError):
+        service.timeline(run_id)
+
+
 def test_evaluation_weights_exact_interval_intersections() -> None:
     timebase = Timebase(100, 100)
     spec_id = "sha256:" + ("a" * 64)

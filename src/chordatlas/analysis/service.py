@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from chordatlas.analysis.baseline import analyze_pcm16_wav
+from chordatlas.analysis.baseline import analyze_pcm16_wav_stream
 from chordatlas.analysis.models import (
     AnalysisConfig,
     AnalysisError,
@@ -19,6 +19,7 @@ from chordatlas.analysis.models import (
     timeline_from_mapping,
 )
 from chordatlas.analysis.store import AnalysisStore
+from chordatlas.media.models import MediaImportError
 from chordatlas.media.store import ProjectMediaStore
 
 _MAX_WORKER_MESSAGE_BYTES = 8 * 1024 * 1024
@@ -31,6 +32,7 @@ _WORKER_ERRORS = {
     "analysis_range_too_short": ("Choose at least a quarter-second analysis range.", True),
     "decode_failed": ("The authorized WAV could not be analyzed.", True),
     "invalid_parameters": ("The analysis configuration is invalid.", False),
+    "media_unavailable": ("The authorized media asset is unavailable.", False),
     "unsupported_media": ("The baseline engine requires PCM16 WAV.", False),
     "worker_failed": ("The analysis worker failed safely. Retry the run.", True),
 }
@@ -81,7 +83,6 @@ class AnalysisService:
             try:
                 source = self.media.source(source_id)
                 asset = self.media.asset_for_source(source_id)
-                resolved = self.media.audio_path_for_source(source_id)
             except Exception as error:
                 if isinstance(error, AnalysisError):
                     raise
@@ -137,7 +138,7 @@ class AnalysisService:
             job = _Job(run.id, threading.Event())
             thread = threading.Thread(
                 target=self._supervise,
-                args=(job, resolved, spec),
+                args=(job, source_id, spec),
                 daemon=False,
                 name=f"analysis-{run.id}",
             )
@@ -234,7 +235,7 @@ class AnalysisService:
             if job.thread is not None:
                 job.thread.join(self.cancel_grace_seconds + 5)
 
-    def _supervise(self, job: _Job, audio_path: Path, spec: AnalysisSpec) -> None:
+    def _supervise(self, job: _Job, source_id: str, spec: AnalysisSpec) -> None:
         try:
             if job.cancel.is_set():
                 self.store.transition(job.run_id, "cancelled")
@@ -245,7 +246,13 @@ class AnalysisService:
             worker_cancel = context.Event()
             process = context.Process(
                 target=_worker_main,
-                args=(sender, worker_cancel, str(audio_path), {"id": spec.id, **spec.identity_mapping()}),
+                args=(
+                    sender,
+                    worker_cancel,
+                    str(self.media.project_root),
+                    source_id,
+                    {"id": spec.id, **spec.identity_mapping()},
+                ),
                 daemon=False,
             )
             job.process = process
@@ -377,15 +384,35 @@ class AnalysisService:
                 pass
 
 
-def _worker_main(sender, cancel_event, audio_path: str, spec_value: dict[str, Any]) -> None:
+def _worker_main(
+    sender,
+    cancel_event,
+    project_root: str,
+    source_id: str,
+    spec_value: dict[str, Any],
+) -> None:
     try:
         spec = spec_from_mapping(spec_value)
-        timeline = analyze_pcm16_wav(
-            Path(audio_path),
-            spec,
-            cancelled=cancel_event.is_set,
+        media = ProjectMediaStore.open(Path(project_root))
+        asset, handle = media.open_audio_for_source(
+            source_id,
+            expected_asset_id=spec.asset_id,
         )
+        if asset.timebase != spec.timebase:
+            raise MediaImportError(
+                "storage_integrity",
+                "Project media storage failed an integrity check.",
+                retryable=False,
+            )
+        with handle:
+            timeline = analyze_pcm16_wav_stream(
+                handle,
+                spec,
+                cancelled=cancel_event.is_set,
+            )
         _send_worker_message(sender, {"ok": True, "timeline": timeline.to_record_mapping()})
+    except MediaImportError:
+        _send_worker_message(sender, {"ok": False, "error": {"code": "media_unavailable"}})
     except AnalysisError as error:
         _send_worker_message(sender, {"ok": False, "error": {"code": error.code}})
     except Exception:

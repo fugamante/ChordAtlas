@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import secrets
 import socket
 import sys
@@ -1293,37 +1294,37 @@ class StudioHandler(BaseHTTPRequestHandler):
             return
         try:
             source_id = self.server.source_for_playback_handle(handle)
-            path = self.server.store.audio_path_for_source(source_id)
+            _asset, handle_file = self.server.store.open_audio_for_source(source_id)
         except MediaImportError as error:
             self._send_json(error.to_mapping(), status=HTTPStatus.NOT_FOUND)
             return
-        size = path.stat().st_size
-        try:
-            start, end, partial = _parse_range(self.headers.get("Range"), size)
-        except ValueError:
+        with handle_file:
+            size = os.fstat(handle_file.fileno()).st_size
+            try:
+                start, end, partial = _parse_range(self.headers.get("Range"), size)
+            except ValueError:
+                self._send_headers(
+                    HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE,
+                    content_length=0,
+                    content_type="audio/wav",
+                    extra_headers={"Content-Range": f"bytes */{size}", "Accept-Ranges": "bytes"},
+                )
+                return
+            length = end - start + 1
+            headers = {
+                "Accept-Ranges": "bytes",
+                "ETag": f'"{source_id}"',
+            }
+            if partial:
+                headers["Content-Range"] = f"bytes {start}-{end}/{size}"
             self._send_headers(
-                HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE,
-                content_length=0,
+                HTTPStatus.PARTIAL_CONTENT if partial else HTTPStatus.OK,
+                content_length=length,
                 content_type="audio/wav",
-                extra_headers={"Content-Range": f"bytes */{size}", "Accept-Ranges": "bytes"},
+                extra_headers=headers,
             )
-            return
-        length = end - start + 1
-        headers = {
-            "Accept-Ranges": "bytes",
-            "ETag": f'"{source_id}"',
-        }
-        if partial:
-            headers["Content-Range"] = f"bytes {start}-{end}/{size}"
-        self._send_headers(
-            HTTPStatus.PARTIAL_CONTENT if partial else HTTPStatus.OK,
-            content_length=length,
-            content_type="audio/wav",
-            extra_headers=headers,
-        )
-        if head_only:
-            return
-        with path.open("rb") as handle_file:
+            if head_only:
+                return
             handle_file.seek(start)
             remaining = length
             while remaining:

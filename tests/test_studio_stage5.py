@@ -25,7 +25,7 @@ class FixtureTransport:
     def download(
         self,
         source: DirectHttpsSource,
-        stage_path: Path,
+        stage_handle,
         *,
         progress,
         cancelled,
@@ -35,7 +35,10 @@ class FixtureTransport:
         assert len(self.payload) <= max_bytes
         if cancelled():
             raise AssertionError("fixture was cancelled before download")
-        stage_path.write_bytes(self.payload)
+        stage_handle.seek(0)
+        stage_handle.truncate(0)
+        stage_handle.write(self.payload)
+        stage_handle.flush()
         progress(len(self.payload), len(self.payload))
         return DownloadResult(len(self.payload), source.url)
 
@@ -205,6 +208,29 @@ def test_stage5_ui_separates_private_url_authorization_and_job_actions(
             assert identifier in html
         assert "webpage that plays or describes audio is not a" in html
         assert "direct media URL" in html
+
+
+def test_stage5_ui_reuses_ambiguous_acquisition_idempotency_key(
+    tmp_path: Path,
+) -> None:
+    transport = FixtureTransport(progression_wav())
+    with acquisition_server(tmp_path, transport) as server:
+        status, _headers, body = request(server, "GET", "/app.js")
+        assert status == HTTPStatus.OK
+        script = body.decode()
+
+        assert "let pendingAcquisitionRequest = null;" in script
+        assert "const acquisitionRequestKey = (" in script
+        assert "pendingAcquisitionRequest.url === url" in script
+        assert "pendingAcquisitionRequest.displayName === displayName" in script
+        assert (
+            "pendingAcquisitionRequest.authorizationConfirmed === authorizationConfirmed"
+            in script
+        )
+        assert 'key: `acquire-${crypto.randomUUID()}`' in script
+        assert '"Idempotency-Key": idempotencyKey' in script
+        assert "error.durableResolution = true;" in script
+        assert "if (error.durableResolution) pendingAcquisitionRequest = null;" in script
 
 
 def test_direct_media_reaches_reviewed_songchart_exports_without_locator(

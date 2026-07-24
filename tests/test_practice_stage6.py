@@ -499,6 +499,114 @@ def test_interrupted_head_commit_is_repaired_by_same_idempotent_retry(
     assert repaired["attempt"]["rate_milli"] == 900
 
 
+def test_valid_old_head_is_reconciled_to_complete_receipt_lineage(
+    tmp_path: Path,
+) -> None:
+    practice, _promotion, _media, _source_id, approval_id = approved_fixture(tmp_path)
+    value = practice.create(approval_id, idempotency_key="stage6-rollback-create")
+    session_id = value["practice_session"]["practice_session_id"]
+
+    def state(rate_milli: int) -> dict:
+        return {
+            "target_id": value["attempt"]["target_id"],
+            "custom_range": None,
+            "position_frame": 0,
+            "loop_enabled": True,
+            "rate_milli": rate_milli,
+            "count_in": "off",
+        }
+
+    first = practice.update(
+        session_id,
+        expected_token=value["head"]["token"],
+        idempotency_key="stage6-rollback-first",
+        state_mapping=state(900),
+    )
+    old_head = practice.store.load_head(session_id)
+    second = practice.update(
+        session_id,
+        expected_token=first["head"]["token"],
+        idempotency_key="stage6-rollback-second",
+        state_mapping=state(800),
+    )
+
+    practice.store._replace_head(old_head)
+    restored = PracticeService(tmp_path).get(session_id)
+    assert restored["head"]["generation"] == second["head"]["generation"]
+    assert restored["attempt"]["attempt_id"] == second["attempt"]["attempt_id"]
+
+    with pytest.raises(PracticeError) as stale:
+        practice.update(
+            session_id,
+            expected_token=old_head.token,
+            idempotency_key="stage6-rollback-fresh-branch",
+            state_mapping=state(750),
+        )
+    assert stale.value.code == "practice_conflict"
+
+
+def test_ambiguous_complete_receipt_branches_fail_closed(tmp_path: Path) -> None:
+    practice, _promotion, _media, _source_id, approval_id = approved_fixture(tmp_path)
+    value = practice.create(approval_id, idempotency_key="stage6-branch-create")
+    session_id = value["practice_session"]["practice_session_id"]
+    state = {
+        "target_id": value["attempt"]["target_id"],
+        "custom_range": None,
+        "position_frame": 0,
+        "loop_enabled": True,
+        "rate_milli": 900,
+        "count_in": "off",
+    }
+    first = practice.update(
+        session_id,
+        expected_token=value["head"]["token"],
+        idempotency_key="stage6-branch-first",
+        state_mapping=state,
+    )
+    state["rate_milli"] = 800
+    practice.update(
+        session_id,
+        expected_token=first["head"]["token"],
+        idempotency_key="stage6-branch-second",
+        state_mapping=state,
+    )
+
+    parent = practice.store.load_attempt(first["attempt"]["attempt_id"])
+    sibling = PracticeAttempt.create(
+        session_id=session_id,
+        parent_attempt_id=parent.id,
+        selection_kind=parent.selection_kind,
+        target_id=parent.target_id,
+        frame_range=parent.frame_range,
+        position_frame=parent.position_frame,
+        loop_enabled=parent.loop_enabled,
+        rate_milli=750,
+        count_in_beats=parent.count_in_beats,
+        count_in_beat_frames_num=parent.count_in_beat_frames_num,
+        count_in_beat_frames_den=parent.count_in_beat_frames_den,
+        recorded_at="2026-07-23T12:00:00+00:00",
+    )
+    practice.store._publish_attempt(sibling)
+    key_hash = practice_store_module._idempotency_hash("stage6-branch-sibling")
+    practice_store_module._publish_json(
+        practice.store.receipts / f"{key_hash}.json",
+        {
+            "practice_receipt_schema_version": "1.0.0-draft",
+            "key_hash": key_hash,
+            "action": "update",
+            "fingerprint": "f" * 64,
+            "recorded_at": sibling.recorded_at,
+            "attempt_id": sibling.id,
+            "parent_attempt_id": parent.id,
+            "generation": 2,
+        },
+    )
+
+    with pytest.raises(PracticeError) as ambiguous:
+        PracticeService(tmp_path).get(session_id)
+    assert ambiguous.value.code == "practice_storage_integrity"
+
+
 def test_concurrent_writers_require_exact_head_and_do_not_overwrite(
     tmp_path: Path,
 ) -> None:

@@ -5,7 +5,6 @@ import hashlib
 import json
 import os
 import stat
-import tempfile
 import threading
 import time
 from contextlib import contextmanager
@@ -13,6 +12,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
+from chordatlas._fs import (
+    ProjectAnchor,
+    TargetOccupiedError,
+    create_text_exclusive,
+    replace_text,
+)
 from chordatlas.analysis.models import ChordCandidateTimeline
 from chordatlas.review.models import (
     MAX_REVISIONS,
@@ -44,7 +49,13 @@ _TIMELINE_RE = "rtl_"
 class ReviewStore:
     def __init__(self, project_root: Path) -> None:
         self.project_root = project_root.resolve(strict=True)
-        self.root = self.project_root / ".chordatlas" / "review"
+        storage_root = self.project_root / ".chordatlas"
+        _require_dir(storage_root)
+        try:
+            self.anchor = ProjectAnchor(storage_root)
+        except OSError:
+            raise _integrity_error() from None
+        self.root = storage_root / "review"
         self.sessions = self.root / "sessions"
         self.edits = self.root / "edits" / "sha256"
         self.revisions = self.root / "revisions" / "sha256"
@@ -71,8 +82,14 @@ class ReviewStore:
             store.locks,
             store.tmp,
         ):
-            _ensure_dir(path)
+            _ensure_dir(path, store.anchor)
         return store
+
+    def _verify_anchor(self) -> None:
+        try:
+            self.anchor.verify()
+        except OSError:
+            raise _integrity_error() from None
 
     def create_session(
         self,
@@ -83,6 +100,7 @@ class ReviewStore:
         idempotency_key: str,
         created_at: str,
     ) -> ReviewSession:
+        self._verify_anchor()
         root = root_timeline(base)
         key_hash = _key_hash(idempotency_key)
         request_fingerprint = hashlib.sha256(
@@ -148,9 +166,9 @@ class ReviewStore:
                 root_revision_id=revision.id,
                 created_at=created_at,
             )
-            _ensure_dir(session_dir)
+            _ensure_dir(session_dir, self.anchor)
             events_dir = session_dir / "events"
-            _ensure_dir(events_dir)
+            _ensure_dir(events_dir, self.anchor)
             self._publish_timeline(root)
             self._publish_revision(revision)
             self._publish_immutable(session_dir / "session.json", session.to_record_mapping())
@@ -186,9 +204,16 @@ class ReviewStore:
         source_id: str | None = None,
         analysis_run_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        self._verify_anchor()
         values = []
-        for path in sorted(self.sessions.glob("review_*")):
-            if path.is_symlink() or not path.is_dir() or not (path / "visible.json").exists():
+        for name in _entry_names(self.sessions, self.anchor):
+            if not name.startswith("review_"):
+                continue
+            path = self.sessions / name
+            try:
+                _require_dir_anchored(path, self.anchor)
+                self._read_json(path / "visible.json")
+            except ReviewError:
                 continue
             session = self.load_session(path.name)
             if source_id is not None and session.source_id != source_id:
@@ -211,10 +236,11 @@ class ReviewStore:
         return sorted(values, key=lambda item: (item["created_at"], item["session_id"]))
 
     def load_session(self, session_id: str) -> ReviewSession:
+        self._verify_anchor()
         _validate_session_id(session_id)
         session_dir = self.sessions / session_id
-        _require_dir(session_dir)
-        _require_dir(session_dir / "events")
+        _require_dir_anchored(session_dir, self.anchor)
+        _require_dir_anchored(session_dir / "events", self.anchor)
         try:
             return session_from_mapping(
                 self._read_json(session_dir / "session.json")
@@ -225,6 +251,7 @@ class ReviewStore:
             raise _integrity_error() from None
 
     def load_head(self, session_id: str) -> ReviewHead:
+        self._verify_anchor()
         session = self.load_session(session_id)
         session_dir = self.sessions / session.id
         latest = self._latest_event_head(session)
@@ -248,6 +275,7 @@ class ReviewStore:
         *,
         base: ChordCandidateTimeline,
     ) -> tuple[ReviewSession, ReviewHead, ReviewRevision, ReviewedTimeline]:
+        self._verify_anchor()
         session = self.load_session(session_id)
         if session.base_timeline_id != base.id:
             raise _integrity_error()
@@ -265,6 +293,7 @@ class ReviewStore:
         edit: ReviewEdit,
         created_at: str,
     ) -> tuple[ReviewHead, ReviewRevision, ReviewedTimeline]:
+        self._verify_anchor()
         request_fingerprint = hashlib.sha256(
             canonical_request(
                 {
@@ -347,6 +376,7 @@ class ReviewStore:
         idempotency_key: str,
         created_at: str,
     ) -> tuple[ReviewHead, ReviewRevision, ReviewedTimeline]:
+        self._verify_anchor()
         return self._navigate(
             session_id,
             base=base,
@@ -367,6 +397,7 @@ class ReviewStore:
         requested_revision_id: str,
         created_at: str,
     ) -> tuple[ReviewHead, ReviewRevision, ReviewedTimeline]:
+        self._verify_anchor()
         return self._navigate(
             session_id,
             base=base,
@@ -384,6 +415,7 @@ class ReviewStore:
         *,
         base: ChordCandidateTimeline,
     ) -> tuple[ReviewRevision, ReviewedTimeline]:
+        self._verify_anchor()
         chain: list[ReviewRevision] = []
         seen: set[str] = set()
         current_id: str | None = revision_id
@@ -419,6 +451,7 @@ class ReviewStore:
         return chain[0], timeline
 
     def revision_depth(self, session: ReviewSession, revision_id: str) -> int:
+        self._verify_anchor()
         depth = 0
         seen: set[str] = set()
         current_id: str | None = revision_id
@@ -580,14 +613,15 @@ class ReviewStore:
         session: ReviewSession,
     ) -> list[tuple[dict[str, Any], ReviewHead]]:
         events_dir = self.sessions / session.id / "events"
-        _require_dir(events_dir)
-        paths = sorted(events_dir.glob("*.json"))
-        if not paths or len(paths) > _MAX_HEAD_EVENTS + 1:
+        _require_dir_anchored(events_dir, self.anchor)
+        names = _json_names(events_dir, self.anchor)
+        if not names or len(names) > _MAX_HEAD_EVENTS + 1:
             raise _integrity_error()
         records: list[tuple[dict[str, Any], ReviewHead]] = []
         previous: ReviewHead | None = None
         try:
-            for path in paths:
+            for name in names:
+                path = events_dir / name
                 event = self._read_json(path)
                 _validate_event(event)
                 head = head_from_mapping(event["head"])
@@ -800,38 +834,64 @@ class ReviewStore:
             raise _integrity_error()
         parent = root / digest[:2]
         if create:
-            _ensure_dir(parent)
+            _ensure_dir(parent, self.anchor)
         else:
-            _require_dir(parent)
+            _require_dir_anchored(parent, self.anchor)
         return parent / f"{digest}.json"
 
     def _publish_immutable(self, path: Path, value: dict[str, Any]) -> None:
         payload = json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n"
-        stage = _stage_text(self.tmp, payload)
         try:
-            try:
-                os.link(stage, path, follow_symlinks=False)
-                _sync_dir(path.parent)
-            except FileExistsError:
-                if self._read_json(path) != value:
-                    raise _integrity_error()
-        finally:
-            stage.unlink(missing_ok=True)
+            create_text_exclusive(
+                path,
+                payload,
+                stage_prefix=".review-",
+                mode=0o600,
+                sync_directory=True,
+                anchor=self.anchor,
+            )
+        except TargetOccupiedError:
+            if self._read_json(path) != value:
+                raise _integrity_error()
+        except OSError:
+            raise _integrity_error() from None
 
     def _replace_head(self, path: Path, head: ReviewHead) -> None:
         payload = json.dumps(head.to_record_mapping(), indent=2, sort_keys=True) + "\n"
-        stage = _stage_text(self.tmp, payload)
         try:
-            os.replace(stage, path)
-            os.chmod(path, 0o600)
-            _sync_dir(path.parent)
-        finally:
-            stage.unlink(missing_ok=True)
+            create_text_exclusive(
+                path,
+                payload,
+                stage_prefix=".review-head-",
+                mode=0o600,
+                sync_directory=True,
+                anchor=self.anchor,
+            )
+            return
+        except TargetOccupiedError:
+            pass
+        except OSError:
+            raise _integrity_error() from None
+        try:
+            replace_text(
+                path,
+                payload,
+                stage_prefix=".review-head-",
+                prepublish=_guard_leaf,
+                sync_directory=True,
+                anchor=self.anchor,
+            )
+        except OSError:
+            raise _integrity_error() from None
 
-    @staticmethod
-    def _read_json(path: Path) -> dict[str, Any]:
+    def _read_json(self, path: Path) -> dict[str, Any]:
         try:
-            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with self.anchor.parent(path) as (parent_fd, leaf):
+                descriptor = os.open(
+                    leaf,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_fd,
+                )
         except OSError:
             raise _integrity_error() from None
         try:
@@ -846,8 +906,12 @@ class ReviewStore:
                 raise _integrity_error()
             with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
                 descriptor = -1
-                value = json.load(handle)
-        except (OSError, UnicodeError, json.JSONDecodeError):
+                value = json.load(
+                    handle,
+                    object_pairs_hook=_reject_duplicate_keys,
+                    parse_constant=_reject_constant,
+                )
+        except (OSError, UnicodeError, ValueError):
             raise _integrity_error() from None
         finally:
             if descriptor >= 0:
@@ -858,7 +922,7 @@ class ReviewStore:
 
     @contextmanager
     def _claim(self, path: Path) -> Iterator[None]:
-        descriptor = _open_lock(path)
+        descriptor = _open_lock(path, self.anchor)
         try:
             deadline = time.monotonic() + 1.0
             while True:
@@ -969,23 +1033,40 @@ def _monotonic_timestamp(value: str, previous: str) -> str:
     )
 
 
-def _stage_text(root: Path, payload: str) -> Path:
-    descriptor, name = tempfile.mkstemp(prefix=".review-", suffix=".tmp", dir=root)
-    path = Path(name)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        os.fchmod(handle.fileno(), 0o600)
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
-    return path
-
-
-def _open_lock(path: Path) -> int:
-    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+def _guard_leaf(parent_fd: int, leaf: str) -> None:
     try:
-        descriptor = os.open(path, flags, 0o600)
-    except OSError:
-        raise _integrity_error() from None
+        entry = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if (
+        not stat.S_ISREG(entry.st_mode)
+        or entry.st_uid != os.getuid()
+        or stat.S_IMODE(entry.st_mode) != 0o600
+        or entry.st_nlink != 1
+    ):
+        raise _integrity_error()
+
+
+def _open_lock(path: Path, anchor: ProjectAnchor) -> int:
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    for attempt in range(20):
+        try:
+            with anchor.parent(path) as (parent_fd, leaf):
+                descriptor = os.open(leaf, flags, 0o600, dir_fd=parent_fd)
+            break
+        except FileNotFoundError:
+            # Concurrent O_CREAT calls can transiently report ENOENT on some
+            # filesystems. Retry only that benign race; other failures remain
+            # fail-closed.
+            if attempt < 19:
+                time.sleep(0.001)
+                continue
+            raise _integrity_error() from None
+        except OSError:
+            raise _integrity_error() from None
+    if descriptor < 0:
+        raise _integrity_error()
     entry = os.fstat(descriptor)
     if (
         not stat.S_ISREG(entry.st_mode)
@@ -998,12 +1079,20 @@ def _open_lock(path: Path) -> int:
     return descriptor
 
 
-def _ensure_dir(path: Path) -> None:
+def _ensure_dir(path: Path, anchor: ProjectAnchor) -> None:
     try:
-        path.mkdir(mode=0o700)
-    except FileExistsError:
-        pass
-    _require_dir(path)
+        with anchor.directory(anchor.relative(path), create=True):
+            pass
+    except OSError:
+        raise _integrity_error() from None
+
+
+def _require_dir_anchored(path: Path, anchor: ProjectAnchor) -> None:
+    try:
+        with anchor.directory(anchor.relative(path)):
+            pass
+    except OSError:
+        raise _integrity_error() from None
 
 
 def _require_dir(path: Path) -> None:
@@ -1020,12 +1109,39 @@ def _require_dir(path: Path) -> None:
         raise _integrity_error()
 
 
-def _sync_dir(path: Path) -> None:
-    descriptor = os.open(path, getattr(os, "O_DIRECTORY", 0) | os.O_RDONLY)
+def _entry_names(path: Path, anchor: ProjectAnchor) -> tuple[str, ...]:
     try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+        with anchor.directory(anchor.relative(path)) as descriptor:
+            names = tuple(sorted(os.listdir(descriptor)))
+    except OSError:
+        raise _integrity_error() from None
+    if any(Path(name).name != name for name in names):
+        raise _integrity_error()
+    return names
+
+
+def _json_names(path: Path, anchor: ProjectAnchor) -> tuple[str, ...]:
+    names: list[str] = []
+    for name in _entry_names(path, anchor):
+        if name.startswith(".review-") and name.endswith(".tmp"):
+            continue
+        if not name.endswith(".json"):
+            raise _integrity_error()
+        names.append(name)
+    return tuple(names)
+
+
+def _reject_duplicate_keys(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON key")
+        value[key] = item
+    return value
+
+
+def _reject_constant(value: str):
+    raise ValueError(f"invalid JSON constant: {value}")
 
 
 def _integrity_error() -> ReviewError:

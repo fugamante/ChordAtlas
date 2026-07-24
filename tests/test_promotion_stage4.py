@@ -653,6 +653,68 @@ def test_revocation_allows_new_approval_over_same_result(tmp_path: Path) -> None
     assert service.get(second["approval"]["approval_id"])["approval"]["status"] == "active"
 
 
+def test_replayed_approval_key_cannot_reactivate_revoked_approval(
+    tmp_path: Path,
+) -> None:
+    ready, _ = _ready(tmp_path)
+    service = PromotionService(
+        tmp_path,
+        clock=lambda: "2026-07-23T12:00:00+00:00",
+    )
+    session_id = ready["session"]["session_id"]
+    revision_id = ready["head"]["revision_id"]
+    head_token = ready["head"]["token"]
+    preview = service.preview(
+        session_id,
+        revision_id,
+        expected_head_token=head_token,
+        config_mapping=_config(),
+    )
+    approval_args = {
+        "expected_head_token": head_token,
+        "config_mapping": _config(),
+        "expected_spec_id": preview["spec_id"],
+        "expected_result_id": preview["result_id"],
+        "expected_issue_digest": preview["issue_digest"],
+        "acknowledged_issue_ids": _material_ids(preview),
+    }
+    first = service.approve(
+        session_id,
+        revision_id,
+        idempotency_key="stage4-replay-original",
+        **approval_args,
+    )
+    first_id = first["approval"]["approval_id"]
+    service.revoke(
+        first_id,
+        expected_token=first["approval"]["token"],
+        idempotency_key="stage4-replay-revoke",
+        reason="withdrawn",
+    )
+
+    with pytest.raises(PromotionError) as replay:
+        service.approve(
+            session_id,
+            revision_id,
+            idempotency_key="stage4-replay-original",
+            **approval_args,
+        )
+    assert replay.value.code == "idempotency_expired"
+    assert service.get(first_id)["approval"]["status"] == "revoked"
+    assert [
+        event["kind"] for event in service.store._events_for(session_id)
+    ] == ["approved", "revoked"]
+
+    fresh = service.approve(
+        session_id,
+        revision_id,
+        idempotency_key="stage4-replay-fresh",
+        **approval_args,
+    )
+    assert fresh["approval"]["approval_id"] != first_id
+    assert fresh["approval"]["status"] == "active"
+
+
 def test_private_record_hardlink_and_symlink_lock_fail_closed(tmp_path: Path) -> None:
     ready, _ = _ready(tmp_path)
     service = PromotionService(tmp_path, clock=lambda: "2026-07-23T12:00:00+00:00")

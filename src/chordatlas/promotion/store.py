@@ -141,6 +141,14 @@ class PromotionStore:
         allow_existing: bool,
     ) -> None:
         with self.claim(self.locks / f"{approval.session_id}.lock"):
+            if (
+                allow_existing
+                and self.revocation_for(approval.session_id, approval.id) is not None
+            ):
+                raise PromotionError(
+                    "idempotency_expired",
+                    "This idempotent approval was already revoked.",
+                )
             active = self.active_for_session(approval.session_id)
             if active is not None:
                 if active.id == approval.id and allow_existing:
@@ -374,6 +382,7 @@ class PromotionStore:
         if len(paths) > _MAX_EVENTS:
             raise _integrity_error()
         values = []
+        seen_approvals: set[str] = set()
         for generation, path in enumerate(paths):
             value = self._read_json(path)
             kind = value.get("kind")
@@ -409,6 +418,11 @@ class PromotionStore:
                 )
             ):
                 raise _integrity_error()
+            approval_id = str(value["approval_id"])
+            if kind == "approved":
+                if approval_id in seen_approvals:
+                    raise _integrity_error()
+                seen_approvals.add(approval_id)
             values.append(value)
         return tuple(values)
 

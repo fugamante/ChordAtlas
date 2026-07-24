@@ -9,8 +9,7 @@ import ssl
 import stat
 import threading
 import time
-from pathlib import Path
-from typing import Callable, Protocol
+from typing import BinaryIO, Callable, Protocol
 from urllib.parse import urljoin
 
 from chordatlas.acquisition.models import (
@@ -38,7 +37,7 @@ class AcquisitionTransport(Protocol):
     def download(
         self,
         source: DirectHttpsSource,
-        stage_path: Path,
+        stage_handle: BinaryIO,
         *,
         progress: Callable[[int, int], None],
         cancelled: Callable[[], bool],
@@ -79,7 +78,7 @@ class PinnedHttpsTransport:
     def download(
         self,
         source: DirectHttpsSource,
-        stage_path: Path,
+        stage_handle: BinaryIO,
         *,
         progress: Callable[[int, int], None],
         cancelled: Callable[[], bool],
@@ -163,36 +162,34 @@ class PinnedHttpsTransport:
                         retryable=False,
                     )
                 written = 0
-                flags = os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-                descriptor = os.open(stage_path, flags)
-                entry = os.fstat(descriptor)
+                entry = os.fstat(stage_handle.fileno())
                 if (
                     not stat.S_ISREG(entry.st_mode)
                     or entry.st_uid != os.getuid()
                     or stat.S_IMODE(entry.st_mode) != 0o600
                     or entry.st_nlink != 1
                 ):
-                    os.close(descriptor)
                     raise AcquisitionError(
                         "unsafe_stage",
                         "The private acquisition stage failed an integrity check.",
                         retryable=False,
                     )
-                with os.fdopen(descriptor, "wb") as output:
-                    while written < length:
-                        _check_deadline(deadline, cancelled)
-                        connection.settimeout(max(0.1, deadline - time.monotonic()))
-                        payload = response.read(min(_CHUNK_BYTES, length - written))
-                        if not payload:
-                            raise AcquisitionError(
-                                "download_truncated",
-                                "The media response ended before its declared length.",
-                            )
-                        output.write(payload)
-                        written += len(payload)
-                        progress(written, length)
-                    output.flush()
-                    os.fsync(output.fileno())
+                stage_handle.seek(0)
+                stage_handle.truncate(0)
+                while written < length:
+                    _check_deadline(deadline, cancelled)
+                    connection.settimeout(max(0.1, deadline - time.monotonic()))
+                    payload = response.read(min(_CHUNK_BYTES, length - written))
+                    if not payload:
+                        raise AcquisitionError(
+                            "download_truncated",
+                            "The media response ended before its declared length.",
+                        )
+                    stage_handle.write(payload)
+                    written += len(payload)
+                    progress(written, length)
+                stage_handle.flush()
+                os.fsync(stage_handle.fileno())
                 return DownloadResult(written, current.url)
             finally:
                 connection.close()

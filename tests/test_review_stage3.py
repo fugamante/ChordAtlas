@@ -854,6 +854,39 @@ def test_malformed_or_impossible_head_event_fails_closed(
     assert integrity.value.code == "review_storage_integrity"
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        lambda text: text.replace(
+            '  "review_head_event_schema_version": "1.0.0-draft"\n',
+            '  "review_head_event_schema_version": "1.0.0-draft",\n'
+            '  "review_head_event_schema_version": "1.0.0-draft"\n',
+            1,
+        ),
+        lambda text: text.replace('"generation": 0', '"generation": NaN', 1),
+    ),
+)
+def test_noncanonical_head_event_json_fails_closed(
+    tmp_path: Path,
+    mutation,
+) -> None:
+    run_id, _base = provision_success(tmp_path)
+    service = ReviewService(tmp_path)
+    created = service.create(run_id, idempotency_key="create-review-json")
+    session_id = created["session"]["session_id"]
+    event = service.store.sessions / session_id / "events" / "00000000.json"
+    original = event.read_text(encoding="utf-8")
+    changed = mutation(original)
+    assert changed != original
+    event.write_text(changed, encoding="utf-8")
+    os.chmod(event, 0o600)
+
+    with pytest.raises(ReviewError) as integrity:
+        ReviewService(tmp_path).get(session_id)
+
+    assert integrity.value.code == "review_storage_integrity"
+
+
 def test_private_timestamp_text_cannot_escape_through_session_listing(
     tmp_path: Path,
 ) -> None:
@@ -996,3 +1029,25 @@ def test_stage2_timeline_file_is_byte_identical_after_review(tmp_path: Path) -> 
         parameters={"segment_id": created["timeline"]["segments"][0]["id"]},
     )
     assert hashlib.sha256(timeline_path.read_bytes()).digest() == before
+
+
+def test_review_rejects_replaced_fixed_storage_ancestor(tmp_path: Path) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = ReviewStore.initialize(tmp_path)
+    original = tmp_path / ".chordatlas"
+    displaced = tmp_path / "displaced-chordatlas"
+    original.rename(displaced)
+    replacement = tmp_path / ".chordatlas"
+    replacement.mkdir(mode=0o700)
+
+    with pytest.raises(ReviewError) as integrity:
+        store.create_session(
+            source_id="src_" + ("a" * 32),
+            analysis_run_id="run_" + ("b" * 32),
+            base=candidate_timeline(),
+            idempotency_key="create-review-replaced-root",
+            created_at="2026-07-23T00:00:00+00:00",
+        )
+
+    assert integrity.value.code == "review_storage_integrity"
+    assert list(replacement.iterdir()) == []

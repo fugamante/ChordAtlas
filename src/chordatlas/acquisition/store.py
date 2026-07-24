@@ -5,11 +5,12 @@ import json
 import os
 import secrets
 import stat
-import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from chordatlas._fs import ProjectAnchor, TargetOccupiedError, create_text_exclusive
 from chordatlas.acquisition.models import AcquisitionError, AcquisitionRequest, utc_now
 
 _ACTIVE = {"queued", "running", "cancel_requested"}
@@ -23,6 +24,11 @@ class AcquisitionStore:
     def __init__(self, project_root: Path) -> None:
         self.project_root = project_root.resolve(strict=True)
         self.root = self.project_root / ".chordatlas"
+        _require_private_directory(self.root)
+        try:
+            self.anchor = ProjectAnchor(self.root)
+        except OSError:
+            raise _integrity_error() from None
         self.acquisitions_root = self.root / "acquisitions"
         self.requests_root = self.acquisitions_root / "requests"
         self.events_root = self.acquisitions_root / "events"
@@ -42,9 +48,15 @@ class AcquisitionStore:
             store.private_root,
             store.idempotency_root,
         ):
-            _ensure_private_directory(path)
+            _ensure_private_directory(path, store.anchor)
         _require_private_directory(store.tmp_root)
         return store
+
+    def _verify_anchor(self) -> None:
+        try:
+            self.anchor.verify()
+        except OSError:
+            raise _integrity_error() from None
 
     def create_request(
         self,
@@ -53,6 +65,7 @@ class AcquisitionStore:
         display_name: str,
         retry_of: str | None,
     ) -> AcquisitionRequest:
+        self._verify_anchor()
         run_id = f"acq_{secrets.token_hex(16)}"
         source_id = f"src_{secrets.token_hex(16)}"
         timestamp = utc_now()
@@ -67,20 +80,21 @@ class AcquisitionStore:
             retry_of=retry_of,
         )
         _publish_json_exclusive(
-            self.tmp_root,
+            self.anchor,
             self.requests_root / f"{run_id}.json",
             request.to_record_mapping(),
         )
         _publish_json_exclusive(
-            self.tmp_root,
+            self.anchor,
             self.private_root / f"{run_id}.json",
             {"run_id": run_id, "private_url": normalized_url},
         )
-        _ensure_private_directory(self.events_root / run_id)
+        _ensure_private_directory(self.events_root / run_id, self.anchor)
         self.append_event(run_id, "queued", phase="queued")
         return request
 
     def claim_idempotency(self, key: str, fingerprint: str, run_id: str) -> str:
+        self._verify_anchor()
         if not 8 <= len(key) <= 128 or not key.isascii() or any(ord(c) < 32 for c in key):
             raise AcquisitionError(
                 "invalid_idempotency_key",
@@ -95,7 +109,7 @@ class AcquisitionStore:
             "run_id": run_id,
         }
         if path.exists():
-            existing = _read_json(path)
+            existing = _read_json(path, self.anchor)
             if existing["request_fingerprint"] != fingerprint:
                 raise AcquisitionError(
                     "idempotency_conflict",
@@ -104,13 +118,13 @@ class AcquisitionStore:
                 )
             return str(existing["run_id"])
         try:
-            _publish_json_exclusive(self.tmp_root, path, value)
+            _publish_json_exclusive(self.anchor, path, value)
             return run_id
         except AcquisitionError:
             # Another process may win the exclusive link between the existence
             # probe and publication. Read the winner through the same integrity
             # checks and converge only when its request fingerprint matches.
-            existing = _read_json(path)
+            existing = _read_json(path, self.anchor)
             if existing["request_fingerprint"] != fingerprint:
                 raise AcquisitionError(
                     "idempotency_conflict",
@@ -120,10 +134,11 @@ class AcquisitionStore:
             return str(existing["run_id"])
 
     def load_request(self, run_id: str) -> AcquisitionRequest:
+        self._verify_anchor()
         _validate_run_id(run_id)
         try:
             return AcquisitionRequest.from_mapping(
-                _read_json(self.requests_root / f"{run_id}.json")
+                _read_json(self.requests_root / f"{run_id}.json", self.anchor)
             )
         except AcquisitionError:
             raise
@@ -131,16 +146,17 @@ class AcquisitionStore:
             raise _integrity_error() from None
 
     def private_url(self, run_id: str) -> str:
+        self._verify_anchor()
         _validate_run_id(run_id)
         path = self.private_root / f"{run_id}.json"
-        if not path.exists():
+        if not _path_exists(path, self.anchor):
             raise AcquisitionError(
                 "locator_forgotten",
                 "The private locator was removed. This acquisition cannot be retried.",
                 retryable=False,
             )
         try:
-            value = _read_json(path)
+            value = _read_json(path, self.anchor)
             if value["run_id"] != run_id:
                 raise _integrity_error()
             return str(value["private_url"])
@@ -148,15 +164,15 @@ class AcquisitionStore:
             raise _integrity_error() from None
 
     def forget_private_url(self, run_id: str) -> None:
+        self._verify_anchor()
         _validate_run_id(run_id)
         path = self.private_root / f"{run_id}.json"
-        if not path.exists():
+        if not _path_exists(path, self.anchor):
             return
-        value = _read_json(path)
+        value = _read_json(path, self.anchor)
         if value.get("run_id") != run_id:
             raise _integrity_error()
-        path.unlink()
-        _sync_directory(path.parent)
+        _unlink_private(path, self.anchor)
 
     def append_event(
         self,
@@ -170,6 +186,7 @@ class AcquisitionStore:
         failure_message: str | None = None,
         retryable: bool = True,
     ) -> dict[str, Any]:
+        self._verify_anchor()
         _validate_run_id(run_id)
         current = self.status(run_id, missing_ok=True)
         if current is not None:
@@ -192,6 +209,11 @@ class AcquisitionStore:
                     retryable=False,
                 )
             revision = int(current["revision"]) + 1
+            if status in _TERMINAL | {"cancel_requested"}:
+                if bytes_received == 0 and int(current["bytes_received"]) > 0:
+                    bytes_received = int(current["bytes_received"])
+                if byte_length is None and current["byte_length"] is not None:
+                    byte_length = int(current["byte_length"])
         else:
             if status != "queued":
                 raise AcquisitionError("invalid_transition", "Acquisition must begin queued.")
@@ -210,24 +232,33 @@ class AcquisitionStore:
             "retryable": retryable,
         }
         directory = self.events_root / run_id
-        _require_private_directory(directory)
-        _publish_json_exclusive(self.tmp_root, directory / f"{revision:08d}.json", event)
+        _require_private_directory_anchored(directory, self.anchor)
+        _publish_json_exclusive(self.anchor, directory / f"{revision:08d}.json", event)
         return event
 
     def status(self, run_id: str, *, missing_ok: bool = False) -> dict[str, Any] | None:
+        self._verify_anchor()
         _validate_run_id(run_id)
         directory = self.events_root / run_id
-        if not directory.exists():
+        if not _path_exists(directory, self.anchor):
             if missing_ok:
                 return None
             raise AcquisitionError("unknown_acquisition", "Acquisition was not found.")
-        _require_private_directory(directory)
-        paths = sorted(directory.glob("*.json"))
-        if not paths:
+        _require_private_directory_anchored(directory, self.anchor)
+        names = _json_names(directory, self.anchor)
+        if not names:
             if missing_ok:
                 return None
             raise _integrity_error()
-        value = _read_json(paths[-1])
+        events = []
+        for revision, name in enumerate(names):
+            if name != f"{revision:08d}.json":
+                raise _integrity_error()
+            value = _read_json(directory / name, self.anchor)
+            _validate_event(value, run_id=run_id, revision=revision)
+            events.append(value)
+        _validate_event_sequence(events)
+        value = events[-1]
         request = self.load_request(run_id)
         public = {
             "run_id": run_id,
@@ -252,7 +283,10 @@ class AcquisitionStore:
                 else str(value["failure_message"])
             ),
             "retryable": bool(value["retryable"]),
-            "locator_retained": (self.private_root / f"{run_id}.json").exists(),
+            "locator_retained": _path_exists(
+                self.private_root / f"{run_id}.json",
+                self.anchor,
+            ),
             "cancellable": (
                 str(value["status"]) == "queued"
                 or (
@@ -263,16 +297,19 @@ class AcquisitionStore:
         }
         output_path = self.outputs_root / f"{run_id}.json"
         if str(value["status"]) == "succeeded":
-            if not output_path.exists():
+            if not _path_exists(output_path, self.anchor):
                 raise _integrity_error()
-            output = _read_json(output_path)
+            output = _read_json(output_path, self.anchor)
             public["output"] = {"source_id": str(output["source_id"])}
         return public
 
     def list(self) -> list[dict[str, Any]]:
+        self._verify_anchor()
         values = []
-        for path in sorted(self.requests_root.glob("acq_*.json")):
-            value = self.status(path.stem)
+        for name in _json_names(self.requests_root, self.anchor):
+            if not name.startswith("acq_"):
+                continue
+            value = self.status(Path(name).stem)
             assert value is not None
             values.append(value)
         return sorted(
@@ -288,10 +325,12 @@ class AcquisitionStore:
     def lineage(self, run_id: str) -> tuple[str, ...]:
         """Return the complete connected retry family for one immutable attempt."""
 
+        self._verify_anchor()
         _validate_run_id(run_id)
         requests = {
-            path.stem: self.load_request(path.stem)
-            for path in self.requests_root.glob("acq_*.json")
+            Path(name).stem: self.load_request(Path(name).stem)
+            for name in _json_names(self.requests_root, self.anchor)
+            if name.startswith("acq_")
         }
         if run_id not in requests:
             raise AcquisitionError("unknown_acquisition", "Acquisition was not found.")
@@ -309,11 +348,12 @@ class AcquisitionStore:
         return tuple(sorted(related))
 
     def publish_output(self, run_id: str, *, source_id: str, asset_id: str) -> None:
+        self._verify_anchor()
         request = self.load_request(run_id)
         if source_id != request.source_id:
             raise _integrity_error()
         _publish_json_exclusive(
-            self.tmp_root,
+            self.anchor,
             self.outputs_root / f"{run_id}.json",
             {
                 "output_schema_version": "1.0.0-draft",
@@ -324,9 +364,12 @@ class AcquisitionStore:
         )
 
     def recover_interrupted(self, recover_output=None) -> list[str]:
+        self._verify_anchor()
         recovered: list[str] = []
-        for path in sorted(self.requests_root.glob("acq_*.json")):
-            run_id = path.stem
+        for name in _json_names(self.requests_root, self.anchor):
+            if not name.startswith("acq_"):
+                continue
+            run_id = Path(name).stem
             state = self.status(run_id)
             if state is not None and state["status"] in _ACTIVE:
                 output = recover_output(run_id) if recover_output is not None else None
@@ -352,10 +395,14 @@ class AcquisitionStore:
                         retryable=True,
                     )
                 recovered.append(run_id)
-        for path in self.tmp_root.glob(".acquisition-*.tmp"):
-            if path.is_symlink() or not path.is_file():
+        for name in _entry_names(self.tmp_root, self.anchor):
+            if not name.startswith(".acquisition-") or not name.endswith(".tmp"):
+                continue
+            path = self.tmp_root / name
+            try:
+                _unlink_private(path, self.anchor)
+            except AcquisitionError:
                 raise _integrity_error()
-            path.unlink()
         return recovered
 
 
@@ -370,12 +417,20 @@ def re_full_acquisition(value: str) -> bool:
     )
 
 
-def _ensure_private_directory(path: Path) -> None:
+def _ensure_private_directory(path: Path, anchor: ProjectAnchor) -> None:
     try:
-        path.mkdir(mode=0o700)
-    except FileExistsError:
-        pass
-    _require_private_directory(path)
+        with anchor.directory(anchor.relative(path), create=True):
+            pass
+    except OSError:
+        raise _integrity_error() from None
+
+
+def _require_private_directory_anchored(path: Path, anchor: ProjectAnchor) -> None:
+    try:
+        with anchor.directory(anchor.relative(path)):
+            pass
+    except OSError:
+        raise _integrity_error() from None
 
 
 def _require_private_directory(path: Path) -> None:
@@ -392,34 +447,38 @@ def _require_private_directory(path: Path) -> None:
         raise _integrity_error()
 
 
-def _publish_json_exclusive(stage_root: Path, path: Path, value: dict[str, Any]) -> None:
+def _publish_json_exclusive(
+    anchor: ProjectAnchor,
+    path: Path,
+    value: dict[str, Any],
+) -> None:
     payload = json.dumps(value, sort_keys=True, indent=2, allow_nan=False) + "\n"
-    descriptor, name = tempfile.mkstemp(prefix=".acquisition-", suffix=".tmp", dir=stage_root)
-    stage = Path(name)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            os.fchmod(handle.fileno(), 0o600)
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        try:
-            os.link(stage, path, follow_symlinks=False)
-            _sync_directory(path.parent)
-        except FileExistsError:
-            if _read_json(path) != value:
-                raise _integrity_error() from None
-    finally:
-        try:
-            stage.unlink()
-        except FileNotFoundError:
-            pass
+        create_text_exclusive(
+            path,
+            payload,
+            stage_prefix=".acquisition-",
+            mode=0o600,
+            sync_directory=True,
+            anchor=anchor,
+        )
+    except TargetOccupiedError:
+        if _read_json(path, anchor) != value:
+            raise _integrity_error() from None
+    except OSError:
+        raise _integrity_error() from None
 
 
-def _read_json(path: Path) -> dict[str, Any]:
+def _read_json(path: Path, anchor: ProjectAnchor) -> dict[str, Any]:
     value = None
     for attempt in range(20):
         try:
-            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with anchor.parent(path) as (parent_fd, leaf):
+                descriptor = os.open(
+                    leaf,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_fd,
+                )
         except OSError:
             raise _integrity_error() from None
         try:
@@ -440,9 +499,13 @@ def _read_json(path: Path) -> dict[str, Any]:
                 raise _integrity_error()
             with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
                 descriptor = -1
-                value = json.load(handle)
+                value = json.load(
+                    handle,
+                    object_pairs_hook=_reject_duplicate_keys,
+                    parse_constant=_reject_constant,
+                )
             break
-        except (OSError, UnicodeError, json.JSONDecodeError):
+        except (OSError, UnicodeError, ValueError):
             raise _integrity_error() from None
         finally:
             if descriptor >= 0:
@@ -452,12 +515,163 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def _sync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+def _path_exists(path: Path, anchor: ProjectAnchor) -> bool:
     try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+        with anchor.parent(path) as (parent_fd, leaf):
+            os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        raise _integrity_error() from None
+
+
+def _entry_names(path: Path, anchor: ProjectAnchor) -> tuple[str, ...]:
+    try:
+        with anchor.directory(anchor.relative(path)) as descriptor:
+            names = tuple(sorted(os.listdir(descriptor)))
+    except OSError:
+        raise _integrity_error() from None
+    if any(Path(name).name != name for name in names):
+        raise _integrity_error()
+    return names
+
+
+def _json_names(path: Path, anchor: ProjectAnchor) -> tuple[str, ...]:
+    names = tuple(
+        name
+        for name in _entry_names(path, anchor)
+        if not (name.startswith(".acquisition-") and name.endswith(".tmp"))
+    )
+    if any(not name.endswith(".json") for name in names):
+        raise _integrity_error()
+    return names
+
+
+def _unlink_private(path: Path, anchor: ProjectAnchor) -> None:
+    try:
+        with anchor.parent(path) as (parent_fd, leaf):
+            descriptor = os.open(
+                leaf,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+            try:
+                entry = os.fstat(descriptor)
+                named = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+                if (
+                    not stat.S_ISREG(entry.st_mode)
+                    or entry.st_uid != os.getuid()
+                    or entry.st_nlink != 1
+                    or stat.S_IMODE(entry.st_mode) != 0o600
+                    or (entry.st_dev, entry.st_ino) != (named.st_dev, named.st_ino)
+                ):
+                    raise _integrity_error()
+                os.unlink(leaf, dir_fd=parent_fd)
+                os.fsync(parent_fd)
+            finally:
+                os.close(descriptor)
+    except FileNotFoundError:
+        return
+    except AcquisitionError:
+        raise
+    except OSError:
+        raise _integrity_error() from None
+
+
+def _validate_event(value: dict[str, Any], *, run_id: str, revision: int) -> None:
+    expected = {
+        "event_schema_version",
+        "run_id",
+        "revision",
+        "status",
+        "phase",
+        "bytes_received",
+        "byte_length",
+        "updated_at",
+        "failure_code",
+        "failure_message",
+        "retryable",
+    }
+    status = value.get("status")
+    phase = value.get("phase")
+    byte_length = value.get("byte_length")
+    failure_code = value.get("failure_code")
+    failure_message = value.get("failure_message")
+    allowed_phases = {
+        "queued": {"queued"},
+        "running": {"resolving", "receiving", "publishing"},
+        "cancel_requested": {"resolving", "receiving", "publishing"},
+        "succeeded": {"complete"},
+        "failed": {"failed"},
+        "cancelled": {"cancelled"},
+    }
+    if (
+        set(value) != expected
+        or value.get("event_schema_version") != "1.0.0-draft"
+        or value.get("run_id") != run_id
+        or type(value.get("revision")) is not int
+        or value["revision"] != revision
+        or status not in allowed_phases
+        or phase not in allowed_phases[status]
+        or type(value.get("bytes_received")) is not int
+        or value["bytes_received"] < 0
+        or (
+            byte_length is not None
+            and (type(byte_length) is not int or byte_length < value["bytes_received"])
+        )
+        or not _is_timestamp(value.get("updated_at"))
+        or type(value.get("retryable")) is not bool
+    ):
+        raise _integrity_error()
+    if status == "failed":
+        if (
+            not isinstance(failure_code, str)
+            or not failure_code
+            or not isinstance(failure_message, str)
+            or not failure_message
+        ):
+            raise _integrity_error()
+    elif failure_code is not None or failure_message is not None:
+        raise _integrity_error()
+
+
+def _validate_event_sequence(events: list[dict[str, Any]]) -> None:
+    if not events or events[0]["status"] != "queued":
+        raise _integrity_error()
+    allowed = {
+        "queued": {"running", "cancelled", "failed"},
+        "running": {"running", "cancel_requested", "succeeded", "failed"},
+        "cancel_requested": {"cancelled", "failed", "succeeded"},
+    }
+    for prior, current in zip(events, events[1:]):
+        prior_status = str(prior["status"])
+        current_status = str(current["status"])
+        if current_status not in allowed.get(prior_status, set()):
+            raise _integrity_error()
+
+
+def _is_timestamp(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
+
+
+def _reject_duplicate_keys(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON key")
+        value[key] = item
+    return value
+
+
+def _reject_constant(value: str):
+    raise ValueError(f"invalid JSON constant: {value}")
 
 
 def _integrity_error() -> AcquisitionError:

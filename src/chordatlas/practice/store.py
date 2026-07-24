@@ -553,7 +553,7 @@ class PracticeStore:
         receipt_path = self.receipts / f"{key_hash}.json"
         with self.claim(self.locks / f"{session_id}.lock"):
             session = self.load_session(session_id)
-            head = self.load_head(session.id)
+            head = self._reconcile_head_locked(session.id)
             receipt = self._optional_json(receipt_path)
             if receipt is not None:
                 _validate_receipt(
@@ -682,6 +682,15 @@ class PracticeStore:
                 "practice_unavailable",
                 "The private practice session is unavailable.",
             )
+        with self.claim(self.locks / f"{session_id}.lock"):
+            return self._reconcile_head_locked(session_id)
+
+    def _load_head_record(self, session_id: str) -> PracticeHead:
+        if not _valid_identifier(session_id, "practice_", 64):
+            raise PracticeError(
+                "practice_unavailable",
+                "The private practice session is unavailable.",
+            )
         try:
             head = PracticeHead.from_mapping(
                 _read_json(self.heads / f"{session_id}.json")
@@ -698,10 +707,110 @@ class PracticeStore:
         return head
 
     def current(self, session_id: str) -> tuple[PracticeSession, PracticeHead, PracticeAttempt]:
-        session = self.load_session(session_id)
-        head = self.load_head(session.id)
+        if not _valid_identifier(session_id, "practice_", 64):
+            raise PracticeError(
+                "practice_unavailable",
+                "The private practice session is unavailable.",
+            )
+        with self.claim(self.locks / f"{session_id}.lock"):
+            session = self.load_session(session_id)
+            head = self._reconcile_head_locked(session.id)
+            attempt = self.load_attempt(head.attempt_id)
+            return session, head, attempt
+
+    def _reconcile_head_locked(self, session_id: str) -> PracticeHead:
+        """Repair the mutable head from the unique complete receipt lineage."""
+
+        head = self._load_head_record(session_id)
+        ancestry: list[PracticeAttempt] = []
+        seen: set[str] = set()
         attempt = self.load_attempt(head.attempt_id)
-        return session, head, attempt
+        while True:
+            if attempt.id in seen or attempt.session_id != session_id:
+                raise _integrity_error()
+            seen.add(attempt.id)
+            ancestry.append(attempt)
+            if attempt.parent_attempt_id is None:
+                break
+            attempt = self.load_attempt(attempt.parent_attempt_id)
+        ancestry.reverse()
+        if head.generation != len(ancestry) - 1:
+            raise _integrity_error()
+
+        children: dict[str, dict[str, tuple[int, PracticeAttempt]]] = {}
+        complete_ids: set[str] = set()
+        for path in sorted(self.receipts.glob("*.json")):
+            key_hash = path.stem
+            value = _read_json(path)
+            action = value.get("action")
+            fingerprint = value.get("fingerprint")
+            if (
+                not _valid_hex(key_hash, 64)
+                or action not in {"create", "update"}
+                or not isinstance(fingerprint, str)
+            ):
+                raise _integrity_error()
+            try:
+                _validate_receipt(
+                    value,
+                    key_hash=key_hash,
+                    action=action,
+                    fingerprint=fingerprint,
+                )
+            except PracticeError:
+                raise _integrity_error() from None
+            if action != "update":
+                continue
+            try:
+                candidate = self.load_attempt(str(value["attempt_id"]))
+            except PracticeError as error:
+                if error.code == "practice_unavailable":
+                    continue
+                raise
+            if (
+                candidate.parent_attempt_id != value["parent_attempt_id"]
+                or candidate.recorded_at != value["recorded_at"]
+            ):
+                raise _integrity_error()
+            if candidate.session_id != session_id:
+                continue
+            generation = int(value["generation"])
+            parent_id = str(value["parent_attempt_id"])
+            prior = children.setdefault(parent_id, {}).get(candidate.id)
+            if prior is not None and prior != (generation, candidate):
+                raise _integrity_error()
+            children[parent_id][candidate.id] = (generation, candidate)
+            complete_ids.add(candidate.id)
+
+        tip = ancestry[0]
+        generation = 0
+        selected = {tip.id}
+        while True:
+            options = children.get(tip.id, {})
+            if not options:
+                break
+            if len(options) != 1:
+                raise _integrity_error()
+            next_generation, next_attempt = next(iter(options.values()))
+            if next_generation != generation + 1:
+                raise _integrity_error()
+            generation = next_generation
+            tip = next_attempt
+            if tip.id in selected:
+                raise _integrity_error()
+            selected.add(tip.id)
+
+        if complete_ids != selected - {ancestry[0].id}:
+            raise _integrity_error()
+        authoritative = PracticeHead(
+            session_id=session_id,
+            generation=generation,
+            attempt_id=tip.id,
+            updated_at=tip.recorded_at,
+        )
+        if head != authoritative:
+            self._replace_head(authoritative)
+        return authoritative
 
     def _publish_attempt(self, attempt: PracticeAttempt) -> None:
         path = self.attempts / f"{attempt.id[8:]}.json"

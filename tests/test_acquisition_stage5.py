@@ -44,21 +44,23 @@ class FakeTransport:
         self.error = error
         self.calls: list[str] = []
 
-    def download(self, source, stage_path, *, progress, cancelled, max_bytes):
+    def download(self, source, stage_handle, *, progress, cancelled, max_bytes):
         self.calls.append(source.url)
         if self.error:
             raise self.error
         if cancelled():
             raise AcquisitionError("acquisition_cancelled", "Acquisition cancelled.")
         assert len(self.payload) <= max_bytes
-        stage_path.write_bytes(self.payload)
-        os.chmod(stage_path, 0o600)
+        stage_handle.seek(0)
+        stage_handle.truncate(0)
+        stage_handle.write(self.payload)
+        stage_handle.flush()
         progress(len(self.payload), len(self.payload))
         return DownloadResult(len(self.payload), source.url)
 
 
 class BlockingTransport(FakeTransport):
-    def download(self, source, stage_path, *, progress, cancelled, max_bytes):
+    def download(self, source, stage_handle, *, progress, cancelled, max_bytes):
         self.calls.append(source.url)
         while not cancelled():
             threading.Event().wait(0.01)
@@ -238,17 +240,19 @@ def test_transport_pins_numeric_peer_while_preserving_sni_and_host(tmp_path: Pat
         body=payload,
     )
     transport, context, connected, sockets = _pinned_transport([raw])
-    stage = ProjectMediaStore.initialize(tmp_path).allocate_private_stage()
+    media = ProjectMediaStore.initialize(tmp_path)
+    stage = media.allocate_private_stage()
     source = DirectHttpsSource.classify(
         "https://audio.example/download?private=sent-only-to-origin"
     )
-    result = transport.download(
-        source,
-        stage,
-        progress=lambda *_args: None,
-        cancelled=lambda: False,
-        max_bytes=len(payload),
-    )
+    with media.open_private_stage(stage, writable=True) as stage_handle:
+        result = transport.download(
+            source,
+            stage_handle,
+            progress=lambda *_args: None,
+            cancelled=lambda: False,
+            max_bytes=len(payload),
+        )
 
     assert result.byte_length == len(payload)
     assert connected == [("93.184.216.34", 443)]
@@ -285,14 +289,16 @@ def test_transport_manual_same_origin_redirect_revalidates_each_hop(
         body=payload,
     )
     transport, context, connected, _sockets = _pinned_transport([redirect, final])
-    stage = ProjectMediaStore.initialize(tmp_path).allocate_private_stage()
-    result = transport.download(
-        DirectHttpsSource.classify("https://audio.example/start"),
-        stage,
-        progress=lambda *_args: None,
-        cancelled=lambda: False,
-        max_bytes=len(payload),
-    )
+    media = ProjectMediaStore.initialize(tmp_path)
+    stage = media.allocate_private_stage()
+    with media.open_private_stage(stage, writable=True) as stage_handle:
+        result = transport.download(
+            DirectHttpsSource.classify("https://audio.example/start"),
+            stage_handle,
+            progress=lambda *_args: None,
+            cancelled=lambda: False,
+            max_bytes=len(payload),
+        )
 
     assert result.final_url == "https://audio.example/final?opaque=1"
     assert connected == [("93.184.216.34", 443), ("93.184.216.34", 443)]
@@ -307,11 +313,15 @@ def test_transport_rejects_cross_origin_redirect_before_second_resolution(
         headers=(("Location", "https://other.example/final"),),
     )
     transport, _context, connected, _sockets = _pinned_transport([redirect])
-    stage = ProjectMediaStore.initialize(tmp_path).allocate_private_stage()
-    with pytest.raises(AcquisitionError) as rejected:
+    media = ProjectMediaStore.initialize(tmp_path)
+    stage = media.allocate_private_stage()
+    with (
+        media.open_private_stage(stage, writable=True) as stage_handle,
+        pytest.raises(AcquisitionError) as rejected,
+    ):
         transport.download(
             DirectHttpsSource.classify("https://audio.example/start"),
-            stage,
+            stage_handle,
             progress=lambda *_args: None,
             cancelled=lambda: False,
             max_bytes=1024,
@@ -367,11 +377,15 @@ def test_transport_rejects_ambiguous_or_invalid_response_framing(
     transport, _context, _connected, _sockets = _pinned_transport(
         [_response(headers=headers, body=body)]
     )
-    stage = ProjectMediaStore.initialize(tmp_path).allocate_private_stage()
-    with pytest.raises(AcquisitionError) as rejected:
+    media = ProjectMediaStore.initialize(tmp_path)
+    stage = media.allocate_private_stage()
+    with (
+        media.open_private_stage(stage, writable=True) as stage_handle,
+        pytest.raises(AcquisitionError) as rejected,
+    ):
         transport.download(
             DirectHttpsSource.classify("https://audio.example/take"),
-            stage,
+            stage_handle,
             progress=lambda *_args: None,
             cancelled=lambda: False,
             max_bytes=1024,
@@ -390,11 +404,15 @@ def test_declared_oversize_is_actionable_and_not_retryable(tmp_path: Path) -> No
             )
         ]
     )
-    stage = ProjectMediaStore.initialize(tmp_path).allocate_private_stage()
-    with pytest.raises(AcquisitionError) as rejected:
+    media = ProjectMediaStore.initialize(tmp_path)
+    stage = media.allocate_private_stage()
+    with (
+        media.open_private_stage(stage, writable=True) as stage_handle,
+        pytest.raises(AcquisitionError) as rejected,
+    ):
         transport.download(
             DirectHttpsSource.classify("https://audio.example/take"),
-            stage,
+            stage_handle,
             progress=lambda *_args: None,
             cancelled=lambda: False,
             max_bytes=1024,
@@ -548,11 +566,16 @@ def test_acquisition_list_places_active_latest_attempt_last_despite_opaque_id(
 ) -> None:
     store_module = importlib.import_module("chordatlas.acquisition.store")
     tokens = iter(["f" * 32, "a" * 32, "0" * 32, "b" * 32])
+    stage_tokens = iter(f"{index:016x}" for index in range(32))
     clock = iter(
         f"2026-07-23T12:00:0{second}+00:00"
         for second in range(8)
     )
-    monkeypatch.setattr(store_module.secrets, "token_hex", lambda _size: next(tokens))
+    monkeypatch.setattr(
+        store_module.secrets,
+        "token_hex",
+        lambda size: next(tokens) if size == 16 else next(stage_tokens),
+    )
     monkeypatch.setattr(store_module, "utc_now", lambda: next(clock))
     ProjectMediaStore.initialize(tmp_path)
     store = AcquisitionStore.initialize(tmp_path)
@@ -594,6 +617,103 @@ def test_recovery_marks_interrupted_run_failed_without_resolver(tmp_path: Path) 
     assert state is not None
     assert state["status"] == "failed"
     assert state["failure_code"] == "acquisition_interrupted"
+
+
+def test_recovery_rejects_impossible_event_transition(tmp_path: Path) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AcquisitionStore.initialize(tmp_path)
+    request = store.create_request(
+        normalized_url="https://audio.example/take",
+        display_name="take.wav",
+        retry_of=None,
+    )
+    event_dir = store.events_root / request.id
+    first = json.loads((event_dir / "00000000.json").read_text(encoding="utf-8"))
+    first["revision"] = 1
+    second = event_dir / "00000001.json"
+    second.write_text(json.dumps(first), encoding="utf-8")
+    os.chmod(second, 0o600)
+
+    with pytest.raises(AcquisitionError) as rejected:
+        AcquisitionStore.initialize(tmp_path).status(request.id)
+
+    assert rejected.value.code == "acquisition_storage_integrity"
+
+
+def test_recovery_accepts_legacy_terminal_counter_and_clock_reset(tmp_path: Path) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AcquisitionStore.initialize(tmp_path)
+    request = store.create_request(
+        normalized_url="https://audio.example/take",
+        display_name="take.wav",
+        retry_of=None,
+    )
+    store.append_event(
+        request.id,
+        "running",
+        phase="receiving",
+        bytes_received=10,
+        byte_length=100,
+    )
+    event_dir = store.events_root / request.id
+    terminal = {
+        "event_schema_version": "1.0.0-draft",
+        "run_id": request.id,
+        "revision": 2,
+        "status": "failed",
+        "phase": "failed",
+        "bytes_received": 0,
+        "byte_length": None,
+        "updated_at": "2000-01-01T00:00:00+00:00",
+        "failure_code": "network_failed",
+        "failure_message": "Download failed safely.",
+        "retryable": True,
+    }
+    path = event_dir / "00000002.json"
+    path.write_text(json.dumps(terminal), encoding="utf-8")
+    os.chmod(path, 0o600)
+
+    state = AcquisitionStore.initialize(tmp_path).status(request.id)
+
+    assert state is not None
+    assert state["status"] == "failed"
+    assert state["bytes_received"] == 0
+    assert state["byte_length"] is None
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        lambda text: text.replace(
+            '  "revision": 0,\n',
+            '  "revision": 0,\n  "revision": 0,\n',
+            1,
+        ),
+        lambda text: text.replace('"bytes_received": 0', '"bytes_received": NaN', 1),
+    ),
+)
+def test_recovery_rejects_noncanonical_event_json(
+    tmp_path: Path,
+    mutation,
+) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AcquisitionStore.initialize(tmp_path)
+    request = store.create_request(
+        normalized_url="https://audio.example/take",
+        display_name="take.wav",
+        retry_of=None,
+    )
+    event = store.events_root / request.id / "00000000.json"
+    original = event.read_text(encoding="utf-8")
+    changed = mutation(original)
+    assert changed != original
+    event.write_text(changed, encoding="utf-8")
+    os.chmod(event, 0o600)
+
+    with pytest.raises(AcquisitionError) as rejected:
+        AcquisitionStore.initialize(tmp_path).status(request.id)
+
+    assert rejected.value.code == "acquisition_storage_integrity"
 
 
 def test_private_locator_reader_rejects_hardlinks(tmp_path: Path) -> None:
@@ -709,8 +829,9 @@ def test_stage_replacement_fails_before_source_visibility_and_restart_is_clean(
     replacement = bytearray(synthetic_wav())
     replacement[-1] ^= 0x01
 
-    def swap_after_hash(path: Path) -> str:
-        asset_id = original(path)
+    def swap_after_hash(handle) -> str:
+        asset_id = original(handle)
+        path = next((tmp_path / ".chordatlas" / "tmp").iterdir())
         path.unlink()
         path.write_bytes(replacement)
         os.chmod(path, 0o600)
@@ -731,6 +852,36 @@ def test_stage_replacement_fails_before_source_visibility_and_restart_is_clean(
     monkeypatch.setattr(service_module, "_stage_asset_id", original)
     reopened = AcquisitionService(tmp_path, transport=FakeTransport())
     assert reopened.status(run_id)["status"] == "failed"
+
+
+def test_acquisition_never_writes_through_replaced_stage_ancestor(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    transport = FakeTransport()
+    service = AcquisitionService(tmp_path, transport=transport)
+    original_allocate = service.media._allocate_stage
+    external = tmp_path / "external-acquisition-stage"
+    external.mkdir(mode=0o700)
+
+    def allocate_then_replace() -> Path:
+        stage = original_allocate()
+        service.media.tmp_root.rename(tmp_path / "original-acquisition-stage")
+        service.media.tmp_root.symlink_to(external, target_is_directory=True)
+        return stage
+
+    monkeypatch.setattr(service.media, "_allocate_stage", allocate_then_replace)
+    run_id = service.start(
+        url="https://audio.example/take",
+        display_name="take.wav",
+        authorization_confirmed=True,
+    )
+    state = service.wait(run_id, 5)
+
+    assert state["status"] == "failed"
+    assert state["failure_code"] == "storage_integrity"
+    assert transport.calls == []
+    assert list(external.iterdir()) == []
 
 
 def test_consumed_stage_alias_cannot_mutate_published_blob(
@@ -800,3 +951,78 @@ def test_fixture_manifest_is_authorized_and_contains_no_recording() -> None:
         "contains_third_party_recording": False,
         "redistribution_authorized": True,
     }
+
+
+def test_acquisition_rejects_replaced_fixed_storage_ancestor(tmp_path: Path) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AcquisitionStore.initialize(tmp_path)
+    original = tmp_path / ".chordatlas"
+    displaced = tmp_path / "displaced-chordatlas"
+    original.rename(displaced)
+    replacement = tmp_path / ".chordatlas"
+    replacement.mkdir(mode=0o700)
+
+    with pytest.raises(AcquisitionError) as integrity:
+        store.create_request(
+            normalized_url="https://audio.example/take",
+            display_name="take.wav",
+            retry_of=None,
+        )
+
+    assert integrity.value.code == "acquisition_storage_integrity"
+    assert list(replacement.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("run_id", "acq_" + ("f" * 32)),
+        ("revision", True),
+        ("phase", "publishing"),
+        ("bytes_received", True),
+        ("retryable", 1),
+    ),
+)
+def test_acquisition_rejects_malformed_recovery_event_fields(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AcquisitionStore.initialize(tmp_path)
+    request = store.create_request(
+        normalized_url="https://audio.example/take",
+        display_name="take.wav",
+        retry_of=None,
+    )
+    event_path = store.events_root / request.id / "00000000.json"
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+    event[field] = value
+    event_path.write_text(
+        json.dumps(event, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AcquisitionError) as integrity:
+        store.status(request.id)
+
+    assert integrity.value.code == "acquisition_storage_integrity"
+
+
+def test_acquisition_rejects_event_filename_generation_mismatch(
+    tmp_path: Path,
+) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AcquisitionStore.initialize(tmp_path)
+    request = store.create_request(
+        normalized_url="https://audio.example/take",
+        display_name="take.wav",
+        retry_of=None,
+    )
+    event_dir = store.events_root / request.id
+    (event_dir / "00000000.json").rename(event_dir / "00000001.json")
+
+    with pytest.raises(AcquisitionError) as integrity:
+        store.status(request.id)
+
+    assert integrity.value.code == "acquisition_storage_integrity"

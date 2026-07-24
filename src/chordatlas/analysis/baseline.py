@@ -7,6 +7,7 @@ import wave
 from array import array
 from collections.abc import Callable
 from pathlib import Path
+from typing import BinaryIO
 
 from chordatlas.analysis.models import (
     AnalysisError,
@@ -33,6 +34,23 @@ def analyze_pcm16_wav(
 ) -> ChordCandidateTimeline:
     """Run the deterministic, deliberately modest baseline-v1 hypothesis engine."""
 
+    try:
+        with path.open("rb") as handle:
+            return analyze_pcm16_wav_stream(handle, spec, cancelled=cancelled)
+    except AnalysisError:
+        raise
+    except OSError:
+        raise AnalysisError("decode_failed", "The authorized WAV could not be analyzed.") from None
+
+
+def analyze_pcm16_wav_stream(
+    handle: BinaryIO,
+    spec: AnalysisSpec,
+    *,
+    cancelled: Callable[[], bool] = lambda: False,
+) -> ChordCandidateTimeline:
+    """Analyze one already-opened, identity-pinned PCM16 WAV descriptor."""
+
     parameters = dict(spec.config.parameters)
     target_rate = parameters["target_rate"]
     window_frames = parameters["window_frames"]
@@ -44,7 +62,7 @@ def analyze_pcm16_wav(
             "The baseline engine accepts at most ten minutes per run. Analyze a shorter loop.",
         )
     samples, analysis_rate = _read_downmixed(
-        path,
+        handle,
         selected,
         target_rate=target_rate,
         cancelled=cancelled,
@@ -110,14 +128,15 @@ def analyze_pcm16_wav(
 
 
 def _read_downmixed(
-    path: Path,
+    handle: BinaryIO,
     selected: FrameRange,
     *,
     target_rate: int,
     cancelled: Callable[[], bool],
 ) -> tuple[array[float], int]:
     try:
-        with wave.open(str(path), "rb") as reader:
+        handle.seek(0)
+        with wave.open(handle, "rb") as reader:
             channels = reader.getnchannels()
             source_rate = reader.getframerate()
             if reader.getsampwidth() != 2 or channels not in (1, 2):

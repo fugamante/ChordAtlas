@@ -233,8 +233,11 @@ class AcquisitionService:
         return self.store.claim_idempotency(key, fingerprint, "acq_" + ("0" * 32))
 
     def _supervise(self, job: _Job, source: DirectHttpsSource) -> None:
-        stage_path = self.media.allocate_private_stage()
+        stage_path: Path | None = None
+        stage_handle = None
         try:
+            stage_path = self.media.allocate_private_stage()
+            stage_handle = self.media.open_private_stage(stage_path, writable=True)
             if job.cancel.is_set():
                 if self.status(job.run_id)["status"] == "queued":
                     self.store.append_event(job.run_id, "cancelled", phase="cancelled")
@@ -255,11 +258,13 @@ class AcquisitionService:
 
             result = self.transport.download(
                 source,
-                stage_path,
+                stage_handle,
                 progress=progress,
                 cancelled=job.cancel.is_set,
                 max_bytes=self.max_download_bytes,
             )
+            stage_handle.flush()
+            os.fsync(stage_handle.fileno())
             with self._lock:
                 state = self.status(job.run_id)
                 if job.cancel.is_set() or state["status"] == "cancel_requested":
@@ -277,7 +282,7 @@ class AcquisitionService:
                     bytes_received=result.byte_length,
                     byte_length=result.byte_length,
                 )
-                expected_asset_id = _stage_asset_id(stage_path)
+                expected_asset_id = _stage_asset_id(stage_handle)
                 source_record, asset = self.media.publish_staged_file(
                     stage_path,
                     byte_length=result.byte_length,
@@ -291,6 +296,7 @@ class AcquisitionService:
                     ),
                     expected_asset_id=expected_asset_id,
                     max_upload_bytes=self.max_download_bytes,
+                    stage_handle=stage_handle,
                 )
                 if source_record.id != request.source_id or asset.id != expected_asset_id:
                     raise AcquisitionError(
@@ -324,10 +330,13 @@ class AcquisitionService:
                     ),
                 )
         finally:
-            try:
-                stage_path.unlink()
-            except FileNotFoundError:
-                pass
+            if stage_handle is not None:
+                stage_handle.close()
+            if stage_path is not None:
+                try:
+                    self.media.discard_private_stage(stage_path)
+                except MediaImportError:
+                    pass
 
     def _fail(self, job: _Job, error: AcquisitionError | MediaImportError) -> None:
         with self._lock:
@@ -404,48 +413,40 @@ def _safe_display_name(value: str) -> str:
     return (leaf or "remote-audio.wav")[:160]
 
 
-def _stage_asset_id(path: Path) -> str:
+def _stage_asset_id(handle) -> str:
     digest = hashlib.sha256()
-    try:
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    except OSError:
+    before = os.fstat(handle.fileno())
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) != 0o600
+        or before.st_nlink != 1
+    ):
         raise AcquisitionError(
             "unsafe_stage",
             "The private acquisition stage failed an integrity check.",
             retryable=False,
-        ) from None
-    with os.fdopen(descriptor, "rb") as handle:
-        before = os.fstat(handle.fileno())
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or before.st_uid != os.getuid()
-            or stat.S_IMODE(before.st_mode) != 0o600
-            or before.st_nlink != 1
-        ):
-            raise AcquisitionError(
-                "unsafe_stage",
-                "The private acquisition stage failed an integrity check.",
-                retryable=False,
-            )
-        for payload in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(payload)
-        after = os.fstat(handle.fileno())
-        if (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-            after.st_ctime_ns,
-        ) != (
-            before.st_dev,
-            before.st_ino,
-            before.st_size,
-            before.st_mtime_ns,
-            before.st_ctime_ns,
-        ):
-            raise AcquisitionError(
-                "unsafe_stage",
-                "The private acquisition stage changed during validation.",
-                retryable=False,
-            )
+        )
+    handle.seek(0)
+    for payload in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(payload)
+    after = os.fstat(handle.fileno())
+    if (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    ) != (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    ):
+        raise AcquisitionError(
+            "unsafe_stage",
+            "The private acquisition stage changed during validation.",
+            retryable=False,
+        )
     return f"sha256:{digest.hexdigest()}"

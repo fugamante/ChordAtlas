@@ -136,6 +136,150 @@ def test_changed_bytes_under_same_name_create_new_asset(tmp_path: Path) -> None:
     assert len(list(store.blobs_root.rglob("*.wav"))) == 2
 
 
+def test_verified_audio_handle_cannot_be_retargeted_after_validation(
+    tmp_path: Path,
+) -> None:
+    original = synthetic_wav(phase=0.0)
+    replacement = synthetic_wav(phase=0.5)
+    assert len(original) == len(replacement)
+    store = ProjectMediaStore.initialize(tmp_path)
+    source, asset = import_wav(store, original)
+
+    opened_asset, handle = store.open_audio_for_source(
+        source.id,
+        expected_asset_id=asset.id,
+    )
+    blob = store.audio_path_for_source(source.id)
+    displaced = blob.with_suffix(".verified")
+    blob.rename(displaced)
+    blob.write_bytes(replacement)
+    os.chmod(blob, 0o600)
+
+    with handle:
+        assert opened_asset == asset
+        assert handle.read() == original
+    with pytest.raises(MediaImportError) as changed:
+        store.open_audio_for_source(source.id, expected_asset_id=asset.id)
+    assert changed.value.code == "storage_integrity"
+
+
+@pytest.mark.parametrize("operation", ("open", "verify"))
+def test_blob_descriptor_closes_when_named_identity_check_fails(
+    tmp_path: Path,
+    monkeypatch,
+    operation: str,
+) -> None:
+    store = ProjectMediaStore.initialize(tmp_path)
+    source, asset = import_wav(store, synthetic_wav())
+    blob = store.audio_path_for_source(source.id)
+    monkeypatch.setattr(store, "asset_for_source", lambda _source_id: asset)
+    opened: list[int] = []
+    original_open = os.open
+    original_stat = os.stat
+
+    def tracked_open(path, flags, *args, **kwargs):
+        descriptor = original_open(path, flags, *args, **kwargs)
+        if str(path).endswith(".wav") and kwargs.get("dir_fd") is not None:
+            opened.append(descriptor)
+        return descriptor
+
+    def missing_named_blob(path, *args, **kwargs):
+        if str(path).endswith(".wav") and kwargs.get("dir_fd") is not None:
+            raise FileNotFoundError(path)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", tracked_open)
+    monkeypatch.setattr(os, "stat", missing_named_blob)
+
+    with pytest.raises(MediaImportError) as failed:
+        if operation == "open":
+            store.open_audio_for_source(source.id, expected_asset_id=asset.id)
+        else:
+            store._verify_blob(blob, asset.sha256, asset.byte_length)
+
+    assert failed.value.code == "storage_integrity"
+    assert opened
+    for descriptor in opened:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+def test_replaced_storage_ancestor_fails_before_external_publication(
+    tmp_path: Path,
+) -> None:
+    store = ProjectMediaStore.initialize(tmp_path)
+    original_sources = tmp_path / "original-sources"
+    store.sources_root.rename(original_sources)
+    external = tmp_path / "external"
+    external.mkdir(mode=0o700)
+    store.sources_root.symlink_to(external, target_is_directory=True)
+
+    with pytest.raises(MediaImportError) as changed:
+        import_wav(store, synthetic_wav())
+
+    assert changed.value.code == "storage_integrity"
+    assert list(external.iterdir()) == []
+    assert list(store.tmp_root.iterdir()) == []
+
+
+def test_import_never_writes_through_replaced_stage_ancestor(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = ProjectMediaStore.initialize(tmp_path)
+    original_allocate = store._allocate_stage
+    external = tmp_path / "external-stage"
+    external.mkdir(mode=0o700)
+
+    def allocate_then_replace() -> Path:
+        stage = original_allocate()
+        store.tmp_root.rename(tmp_path / "original-stage")
+        store.tmp_root.symlink_to(external, target_is_directory=True)
+        return stage
+
+    monkeypatch.setattr(store, "_allocate_stage", allocate_then_replace)
+    payload = synthetic_wav()
+
+    with pytest.raises(MediaImportError) as rejected:
+        store.import_stream(
+            io.BytesIO(payload),
+            byte_length=len(payload),
+            display_name="fixture.wav",
+            authorization_confirmed=True,
+        )
+
+    assert rejected.value.code == "storage_integrity"
+    assert list(external.iterdir()) == []
+
+
+def test_import_open_failure_cleans_private_stage(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = ProjectMediaStore.initialize(tmp_path)
+
+    def fail_open(_stage_path: Path, *, writable: bool):
+        assert writable
+        raise MediaImportError(
+            "storage_integrity",
+            "Project media storage failed an integrity check.",
+            retryable=False,
+        )
+
+    monkeypatch.setattr(store, "open_private_stage", fail_open)
+    payload = synthetic_wav()
+
+    with pytest.raises(MediaImportError):
+        store.import_stream(
+            io.BytesIO(payload),
+            byte_length=len(payload),
+            display_name="fixture.wav",
+            authorization_confirmed=True,
+        )
+
+    assert list(store.tmp_root.iterdir()) == []
+
+
 def test_authorization_and_size_are_checked_before_staging(tmp_path: Path) -> None:
     payload = synthetic_wav()
     store = ProjectMediaStore.initialize(tmp_path)
@@ -246,6 +390,76 @@ def test_waveform_cache_is_regenerable_without_removing_source(tmp_path: Path) -
     assert len(store.list_public_sources()) == 1
 
 
+def test_waveform_prune_cannot_escape_replaced_cache_ancestor(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = ProjectMediaStore.initialize(tmp_path)
+    source, _asset = import_wav(store, synthetic_wav())
+    waveform = next(store.waveforms_root.rglob("*.json"))
+    relative = waveform.relative_to(store.waveforms_root)
+    original_asset_for_source = store.asset_for_source
+    external = tmp_path / "external-waveforms"
+    outside = external / relative
+    outside.parent.mkdir(parents=True, mode=0o700)
+    outside.write_text("outside\n", encoding="utf-8")
+    os.chmod(outside, 0o600)
+
+    def replace_after_lookup(source_id: str):
+        asset = original_asset_for_source(source_id)
+        store.waveforms_root.rename(tmp_path / "original-waveforms")
+        store.waveforms_root.symlink_to(external, target_is_directory=True)
+        return asset
+
+    monkeypatch.setattr(store, "asset_for_source", replace_after_lookup)
+
+    with pytest.raises(MediaImportError) as rejected:
+        store.prune_waveform_cache(source.id)
+
+    assert rejected.value.code == "storage_integrity"
+    assert outside.read_text(encoding="utf-8") == "outside\n"
+
+
+def test_locator_forget_cannot_escape_replaced_private_ancestor(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = ProjectMediaStore.initialize(tmp_path)
+    source, _asset = import_wav(store, synthetic_wav())
+    locator = store.locators_root / f"{source.id}.json"
+    locator.write_text(
+        json.dumps(
+            {
+                "source_id": source.id,
+                "channel": "direct_https",
+                "private_locator": "https://audio.example/take.wav",
+            }
+        ),
+        encoding="utf-8",
+    )
+    os.chmod(locator, 0o600)
+    original_read = store._read_json
+    external = tmp_path / "external-locators"
+    external.mkdir(mode=0o700)
+    outside = external / locator.name
+    outside.write_bytes(locator.read_bytes())
+    os.chmod(outside, 0o600)
+
+    def read_then_replace(path: Path):
+        value = original_read(path)
+        store.locators_root.rename(tmp_path / "original-locators")
+        store.locators_root.symlink_to(external, target_is_directory=True)
+        return value
+
+    monkeypatch.setattr(store, "_read_json", read_then_replace)
+
+    with pytest.raises(MediaImportError) as rejected:
+        store.forget_remote_locator(source.id)
+
+    assert rejected.value.code == "storage_integrity"
+    assert outside.exists()
+
+
 def test_waveform_cache_cannot_change_asset_timebase(tmp_path: Path) -> None:
     store = ProjectMediaStore.initialize(tmp_path)
     source, _asset = import_wav(store, synthetic_wav())
@@ -298,6 +512,16 @@ def test_project_storage_local_ignore_hides_media_from_git(tmp_path: Path) -> No
     )
 
     assert result.stdout.strip() == "?? .chordatlas/.gitignore"
+
+
+def test_project_storage_rejects_permissive_ignore_file(tmp_path: Path) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    os.chmod(tmp_path / ".chordatlas" / ".gitignore", 0o644)
+
+    with pytest.raises(MediaImportError) as unsafe:
+        ProjectMediaStore.open(tmp_path)
+
+    assert unsafe.value.code == "storage_integrity"
 
 
 def test_waveform_resolution_is_bounded_for_maximum_duration() -> None:

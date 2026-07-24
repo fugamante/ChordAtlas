@@ -17,6 +17,11 @@ def test_ci_runs_release_validation_with_pinned_actions() -> None:
     assert "chordchart schemas --check" in workflow
     assert "chordchart release-check" in workflow
     assert "python -m pytest" not in workflow
+    assert "chordchart validate examples/open-string-progression.yaml" in workflow
+    assert (
+        "chordchart render examples/open-string-progression.yaml --format json"
+        " | python -m json.tool >/tmp/chordatlas-example.json"
+    ) in workflow
     assert "chordchart snapshots check --format json --diff-dir snapshot-diffs" in workflow
     assert "> snapshot-result.json" in workflow
     assert 'for filename in payload["drift_files"]' in workflow

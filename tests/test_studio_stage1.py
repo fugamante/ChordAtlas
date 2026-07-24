@@ -4,6 +4,7 @@ import http.client
 import io
 import json
 import math
+import os
 import struct
 import threading
 import wave
@@ -250,6 +251,56 @@ def test_import_waveform_and_authenticated_single_range_playback(tmp_path: Path)
         assert status == HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE
         assert headers["Content-Range"] == f"bytes */{len(payload)}"
         assert body == b""
+
+
+def test_playback_stream_uses_one_verified_descriptor(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    payload = synthetic_wav()
+    with running_server(tmp_path) as server:
+        cookie = bootstrap(server)
+        status, _headers, body = request(
+            server,
+            "POST",
+            "/api/import",
+            headers={
+                "Cookie": cookie,
+                "Origin": server.origin,
+                "Sec-Fetch-Site": "same-origin",
+                "Content-Type": "audio/wav",
+                "Content-Length": str(len(payload)),
+                "X-ChordAtlas-Authorized": "true",
+                "X-ChordAtlas-File-Name": "synthetic.wav",
+            },
+            body=payload,
+        )
+        assert status == HTTPStatus.CREATED
+        imported = json.loads(body)
+        original_open = server.store.open_audio_for_source
+
+        def open_then_retarget(source_id, **kwargs):
+            asset, handle = original_open(source_id, **kwargs)
+            blob = server.store.audio_path_for_source(source_id)
+            displaced = blob.with_suffix(".verified")
+            blob.rename(displaced)
+            replacement = tmp_path / "replacement.wav"
+            replacement.write_bytes(b"X" * len(payload))
+            os.chmod(replacement, 0o600)
+            os.replace(replacement, blob)
+            return asset, handle
+
+        monkeypatch.setattr(server.store, "open_audio_for_source", open_then_retarget)
+        status, headers, body = request(
+            server,
+            "GET",
+            imported["playback_url"],
+            headers={"Cookie": cookie, "Range": "bytes=0-31"},
+        )
+
+        assert status == HTTPStatus.PARTIAL_CONTENT
+        assert headers["Content-Range"] == f"bytes 0-31/{len(payload)}"
+        assert body == payload[:32]
 
 
 def test_import_requires_authorization_and_exact_origin(tmp_path: Path) -> None:

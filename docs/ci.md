@@ -9,6 +9,8 @@ by maintainers.
 python -m pip install -e ".[dev]"
 chordchart schemas --check
 chordchart release-check
+chordchart validate examples/open-string-progression.yaml
+chordchart render examples/open-string-progression.yaml --format json | python -m json.tool >/tmp/chordatlas-example.json
 ```
 
 ## GitHub Actions Policy
@@ -26,9 +28,10 @@ Current workflow steps:
 3. Install the project with `.[dev]`.
 4. Run `chordchart schemas --check`.
 5. Run `chordchart release-check`.
-6. Re-run snapshot verification with machine-readable diagnostics and diff
+6. Verify the installed CLI by validating and rendering the example chart.
+7. Re-run snapshot verification with machine-readable diagnostics and diff
    artifacts.
-7. Upload any snapshot diff artifacts.
+8. Upload any snapshot diff artifacts.
 
 `release-check` is the single authoritative CI gate. It runs schema mirror
 validation, snapshot verification, Python compilation, full `pytest`, and
@@ -153,6 +156,8 @@ Before opening or updating a pull request, run:
 ```bash
 chordchart schemas --check
 chordchart release-check
+chordchart validate examples/open-string-progression.yaml
+chordchart render examples/open-string-progression.yaml --format json | python -m json.tool >/tmp/chordatlas-example.json
 ```
 
 CI should fail for the same reasons as the local release gate. If CI fails,

@@ -33,6 +33,11 @@ jobs:
       - name: Run release check
         run: chordchart release-check
 
+      - name: Verify installed CLI
+        run: |
+          chordchart validate examples/open-string-progression.yaml
+          chordchart render examples/open-string-progression.yaml --format json | python -m json.tool >/tmp/chordatlas-example.json
+
       - name: Check snapshots
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         shell: bash
