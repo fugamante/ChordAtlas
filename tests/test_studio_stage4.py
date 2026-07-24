@@ -235,3 +235,28 @@ def test_stage4_ui_exposes_labeled_grid_guitar_warning_and_revocation_controls(
         assert "expected_issue_digest" in script
         assert "inversion_reviewed" in script
         assert "full_coverage_confirmed" in script
+
+
+def test_promotion_preview_and_export_colors_meet_wcag_aa(tmp_path: Path) -> None:
+    def luminance(value: str) -> float:
+        channels = [int(value[index : index + 2], 16) / 255 for index in (1, 3, 5)]
+        linear = [
+            channel / 12.92
+            if channel <= 0.04045
+            else ((channel + 0.055) / 1.055) ** 2.4
+            for channel in channels
+        ]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+    with running_server(tmp_path) as server:
+        status, _headers, body = request(server, "GET", "/style.css")
+        assert status == HTTPStatus.OK
+    block = body.decode().split(".promotion-chart {", 1)[1].split("}", 1)[0]
+    assert "background: #fff;" in block
+    assert "color: #17211f;" in block
+    foreground = luminance("#17211f")
+    background = luminance("#ffffff")
+    ratio = (max(foreground, background) + 0.05) / (
+        min(foreground, background) + 0.05
+    )
+    assert ratio >= 4.5

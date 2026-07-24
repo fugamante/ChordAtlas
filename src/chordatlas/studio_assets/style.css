@@ -844,9 +844,10 @@ footer {
 }
 
 .promotion-chart {
-  background: var(--surface, #fff);
+  background: #fff;
   border: 1px solid var(--line);
   border-radius: 0.65rem;
+  color: #17211f;
   max-height: 28rem;
   overflow: auto;
   padding: 1rem;

@@ -691,5 +691,30 @@ def test_analysis_storage_permissions_are_private(tmp_path: Path) -> None:
     assert all(stat_mode(path) == 0o700 for path in store.root.rglob("*") if path.is_dir())
 
 
+def test_analysis_publication_rejects_intermediate_project_ancestor_replacement(
+    tmp_path: Path,
+) -> None:
+    container = tmp_path / "selected"
+    project = container / "project"
+    project.mkdir(parents=True)
+    ProjectMediaStore.initialize(project)
+    store = AnalysisStore.initialize(project)
+    container.rename(tmp_path / "selected-original")
+    project.mkdir(parents=True)
+    replacement = project / ".chordatlas"
+    replacement.mkdir(mode=0o700)
+    spec = AnalysisSpec.create(
+        asset_id="sha256:" + ("a" * 64),
+        timebase=Timebase(8_000, 8_000),
+        analyzed_range=FrameRange(0, 8_000),
+    )
+
+    with pytest.raises(AnalysisError) as rejected:
+        store.publish_spec(spec)
+
+    assert rejected.value.code == "analysis_storage_integrity"
+    assert list(replacement.iterdir()) == []
+
+
 def stat_mode(path: Path) -> int:
     return os.stat(path).st_mode & 0o777

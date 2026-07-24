@@ -14,7 +14,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from chordatlas._fs import TargetOccupiedError, create_text_exclusive, replace_text
+from chordatlas._fs import (
+    ProjectAnchor,
+    TargetOccupiedError,
+    create_text_exclusive,
+    replace_text,
+)
 from chordatlas.practice.models import (
     PracticeAttempt,
     PracticeError,
@@ -35,7 +40,11 @@ _RESET_SCHEMA_VERSION = "1.0.0-draft"
 class PracticeStore:
     def __init__(self, project_root: Path) -> None:
         self.project_root = project_root.resolve(strict=True)
-        self.private_root = self.project_root / ".chordatlas" / "private"
+        try:
+            self.anchor = ProjectAnchor.for_project(self.project_root)
+        except OSError:
+            raise _integrity_error() from None
+        self.private_root = self.anchor.root / "private"
         self.root = self.private_root / "practice"
         self.sessions = self.root / "sessions"
         self.attempts = self.root / "attempts" / "sha256"
@@ -50,12 +59,12 @@ class PracticeStore:
     @classmethod
     def initialize(cls, project_root: Path) -> PracticeStore:
         store = cls(project_root)
-        _require_private_directory(store.private_root)
+        _require_private_directory(store.private_root, store.anchor)
         for path in (
             store.maintenance,
             store.reset_receipts,
         ):
-            _ensure_private_directory(path)
+            _ensure_private_directory(path, store.anchor)
         with store.lifecycle(exclusive=True):
             try:
                 store._recover_reset_locked()
@@ -85,7 +94,7 @@ class PracticeStore:
                 self._lifecycle_local.depth -= 1
             return
 
-        descriptor = _open_lock(self.lifecycle_lock)
+        descriptor = _open_lock(self.lifecycle_lock, self.anchor)
         try:
             _acquire_lock(
                 descriptor,
@@ -120,7 +129,7 @@ class PracticeStore:
                     fingerprint=fingerprint,
                 )
                 return str(existing["recorded_at"])
-            if _entry_count(self.receipts) >= _MAX_RECEIPTS:
+            if _entry_count(self.receipts, self.anchor) >= _MAX_RECEIPTS:
                 raise PracticeError(
                     "practice_limit",
                     "This project reached its private practice-action limit.",
@@ -137,6 +146,7 @@ class PracticeStore:
                     "parent_attempt_id": None,
                     "generation": 0,
                 },
+                self.anchor,
             )
         return recorded_at
 
@@ -212,7 +222,7 @@ class PracticeStore:
                 if receipt["phase"] != "complete":
                     self._recover_one_reset_locked(receipt_path, receipt)
                     receipt = _validate_reset_receipt(
-                        _read_json(receipt_path),
+                        _read_json(receipt_path, self.anchor),
                         key_hash=key_hash,
                         fingerprint=fingerprint,
                     )
@@ -243,7 +253,7 @@ class PracticeStore:
                     }
                 )
             ).hexdigest()
-            root_device, root_inode = _directory_identity(self.root)
+            root_device, root_inode = _directory_identity(self.root, self.anchor)
             receipt = {
                 "practice_reset_schema_version": _RESET_SCHEMA_VERSION,
                 "key_hash": key_hash,
@@ -255,10 +265,10 @@ class PracticeStore:
                 "root_inode": root_inode,
                 "removed": _removed_inventory(before),
             }
-            _publish_json(receipt_path, receipt)
+            _publish_json(receipt_path, receipt, self.anchor)
             self._recover_one_reset_locked(receipt_path, receipt)
             completed = _validate_reset_receipt(
-                _read_json(receipt_path),
+                _read_json(receipt_path, self.anchor),
                 key_hash=key_hash,
                 fingerprint=fingerprint,
             )
@@ -286,7 +296,7 @@ class PracticeStore:
             "recovery": "reset-recovery",
         }
         for name, path, limit in definitions:
-            count, byte_count, leaves = _inventory_directory(path)
+            count, byte_count, leaves = _inventory_directory(path, self.anchor)
             category: dict[str, Any] = {"count": count, "bytes": byte_count}
             if limit is not None:
                 remaining = max(limit - count, 0)
@@ -370,8 +380,9 @@ class PracticeStore:
 
     def _recover_reset_locked(self) -> None:
         pending: list[tuple[Path, dict[str, Any]]] = []
-        for path in sorted(self.reset_receipts.glob("*.json")):
-            receipt = _validate_reset_receipt(_read_json(path))
+        for name in _json_names(self.reset_receipts, self.anchor):
+            path = self.reset_receipts / name
+            receipt = _validate_reset_receipt(_read_json(path, self.anchor))
             if receipt["phase"] != "complete":
                 pending.append((path, receipt))
         if len(pending) > 1:
@@ -387,19 +398,21 @@ class PracticeStore:
         reset_id = str(receipt["reset_id"])
         root_identity = (int(receipt["root_device"]), int(receipt["root_inode"]))
         quarantine = self.private_root / f".practice-quarantine-{reset_id}"
-        root_exists = _path_exists(self.root)
-        quarantine_exists = _path_exists(quarantine)
+        root_exists = _path_exists(self.root, self.anchor)
+        quarantine_exists = _path_exists(quarantine, self.anchor)
 
         if receipt["phase"] == "prepared":
             if root_exists and not quarantine_exists:
-                _require_private_directory(self.root)
-                _rename_directory(self.private_root, self.root.name, quarantine.name)
+                _require_private_directory(self.root, self.anchor)
+                _rename_directory(
+                    self.private_root, self.root.name, quarantine.name, self.anchor
+                )
                 root_exists = False
                 quarantine_exists = True
             if quarantine_exists:
-                _require_directory_identity(quarantine, root_identity)
+                _require_directory_identity(quarantine, root_identity, self.anchor)
                 if root_exists:
-                    _require_private_directory(self.root)
+                    _require_private_directory(self.root, self.anchor)
                 self._ensure_active_tree_locked()
                 root_exists = True
             if not root_exists or not quarantine_exists:
@@ -407,17 +420,18 @@ class PracticeStore:
             if not self._active_history_empty_locked():
                 raise _integrity_error()
             receipt = {**receipt, "phase": "activated"}
-            _replace_json(receipt_path, receipt)
+            _replace_json(receipt_path, receipt, self.anchor)
 
         if receipt["phase"] == "activated":
-            if not _path_exists(self.root):
+            if not _path_exists(self.root, self.anchor):
                 raise _integrity_error()
-            if _path_exists(quarantine):
+            if _path_exists(quarantine, self.anchor):
                 try:
                     _remove_private_tree(
                         self.private_root,
                         quarantine.name,
                         expected_identity=root_identity,
+                        anchor=self.anchor,
                     )
                 except (OSError, PracticeError):
                     raise PracticeError(
@@ -426,7 +440,7 @@ class PracticeStore:
                         retryable=True,
                     ) from None
             receipt = {**receipt, "phase": "complete"}
-            _replace_json(receipt_path, receipt)
+            _replace_json(receipt_path, receipt, self.anchor)
 
     def _ensure_active_tree_locked(self) -> None:
         for path in (
@@ -438,12 +452,12 @@ class PracticeStore:
             self.receipts,
             self.locks,
         ):
-            _ensure_private_directory(path)
-            _sync_directory(path.parent)
+            _ensure_private_directory(path, self.anchor)
+            _sync_directory(path.parent, self.anchor)
 
     def _active_history_empty_locked(self) -> bool:
         return all(
-            _directory_is_empty(path)
+            _directory_is_empty(path, self.anchor)
             for path in (self.sessions, self.attempts, self.heads, self.receipts, self.locks)
         )
 
@@ -485,14 +499,14 @@ class PracticeStore:
                     updated_at=attempt.recorded_at,
                 )
                 if existing_head is None:
-                    _publish_json(head_path, head.to_record_mapping())
+                    _publish_json(head_path, head.to_record_mapping(), self.anchor)
                 else:
                     loaded = PracticeHead.from_mapping(existing_head)
                     if loaded != head:
                         return loaded, self.load_attempt(loaded.attempt_id)
                 return head, attempt
 
-            if _entry_count(self.sessions) >= _MAX_SESSIONS:
+            if _entry_count(self.sessions, self.anchor) >= _MAX_SESSIONS:
                 raise PracticeError(
                     "practice_limit",
                     "This project reached its private practice-session limit.",
@@ -523,7 +537,7 @@ class PracticeStore:
                 ):
                     raise _integrity_error()
                 session = replace(session, created_at=recovered.recorded_at)
-                _publish_json(session_path, session.to_record_mapping())
+                _publish_json(session_path, session.to_record_mapping(), self.anchor)
                 return loaded, recovered
 
             self._publish_attempt(attempt)
@@ -533,10 +547,10 @@ class PracticeStore:
                 attempt_id=attempt.id,
                 updated_at=attempt.recorded_at,
             )
-            _publish_json(head_path, head.to_record_mapping())
+            _publish_json(head_path, head.to_record_mapping(), self.anchor)
             # The session record is the visibility commit. Its dependencies exist
             # first, so interruption cannot expose an unrestorable session.
-            _publish_json(session_path, session.to_record_mapping())
+            _publish_json(session_path, session.to_record_mapping(), self.anchor)
             return head, attempt
 
     def record_attempt(
@@ -592,7 +606,7 @@ class PracticeStore:
                     "Practice state changed. Refresh and try again.",
                     retryable=True,
                 )
-            if _entry_count(self.attempts) >= _MAX_ATTEMPTS:
+            if _entry_count(self.attempts, self.anchor) >= _MAX_ATTEMPTS:
                 raise PracticeError(
                     "practice_limit",
                     "This project reached its private practice-attempt limit.",
@@ -600,7 +614,7 @@ class PracticeStore:
             attempt = build(head.attempt_id, recorded_at)
             if attempt.session_id != session.id or attempt.parent_attempt_id != head.attempt_id:
                 raise _integrity_error()
-            if _entry_count(self.receipts) >= _MAX_RECEIPTS:
+            if _entry_count(self.receipts, self.anchor) >= _MAX_RECEIPTS:
                 raise PracticeError(
                     "practice_limit",
                     "This project reached its private practice-action limit.",
@@ -616,7 +630,7 @@ class PracticeStore:
                 "generation": head.generation + 1,
             }
             # The receipt commits deterministic recovery data before visibility changes.
-            _publish_json(receipt_path, receipt_value)
+            _publish_json(receipt_path, receipt_value, self.anchor)
             self._publish_attempt(attempt)
             next_head = PracticeHead(
                 session_id=session.id,
@@ -629,8 +643,11 @@ class PracticeStore:
 
     def list_sessions(self, *, source_id: str | None = None) -> tuple[PracticeSession, ...]:
         values: list[PracticeSession] = []
-        for path in sorted(self.sessions.glob("practice_*.json")):
-            session = PracticeSession.from_mapping(_read_json(path))
+        for name in _json_names(self.sessions, self.anchor):
+            if not name.startswith("practice_"):
+                continue
+            path = self.sessions / name
+            session = PracticeSession.from_mapping(_read_json(path, self.anchor))
             try:
                 head = self.load_head(session.id)
                 self.load_attempt(head.attempt_id)
@@ -648,7 +665,7 @@ class PracticeStore:
             )
         try:
             session = PracticeSession.from_mapping(
-                _read_json(self.sessions / f"{session_id}.json")
+                _read_json(self.sessions / f"{session_id}.json", self.anchor)
             )
         except PracticeError:
             raise
@@ -666,7 +683,7 @@ class PracticeStore:
             )
         try:
             attempt = PracticeAttempt.from_mapping(
-                _read_json(self.attempts / f"{attempt_id[8:]}.json")
+                _read_json(self.attempts / f"{attempt_id[8:]}.json", self.anchor)
             )
         except PracticeError:
             raise
@@ -693,7 +710,7 @@ class PracticeStore:
             )
         try:
             head = PracticeHead.from_mapping(
-                _read_json(self.heads / f"{session_id}.json")
+                _read_json(self.heads / f"{session_id}.json", self.anchor)
             )
         except PracticeError:
             raise
@@ -739,9 +756,10 @@ class PracticeStore:
 
         children: dict[str, dict[str, tuple[int, PracticeAttempt]]] = {}
         complete_ids: set[str] = set()
-        for path in sorted(self.receipts.glob("*.json")):
+        for name in _json_names(self.receipts, self.anchor):
+            path = self.receipts / name
             key_hash = path.stem
-            value = _read_json(path)
+            value = _read_json(path, self.anchor)
             action = value.get("action")
             fingerprint = value.get("fingerprint")
             if (
@@ -816,7 +834,7 @@ class PracticeStore:
         path = self.attempts / f"{attempt.id[8:]}.json"
         existing = self._optional_json(path)
         if existing is None:
-            _publish_json(path, attempt.to_record_mapping())
+            _publish_json(path, attempt.to_record_mapping(), self.anchor)
         elif existing != attempt.to_record_mapping():
             raise _integrity_error()
 
@@ -829,23 +847,24 @@ class PracticeStore:
                 stage_prefix=".practice-head-",
                 prepublish=_guard_leaf,
                 sync_directory=True,
+                anchor=self.anchor,
             )
         except OSError:
             raise _integrity_error() from None
 
-    @staticmethod
-    def _optional_json(path: Path) -> dict[str, Any] | None:
+    def _optional_json(self, path: Path) -> dict[str, Any] | None:
         try:
-            path.lstat()
+            with self.anchor.parent(path) as (parent_fd, leaf):
+                os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
         except FileNotFoundError:
             return None
         except OSError:
             raise _integrity_error() from None
-        return _read_json(path)
+        return _read_json(path, self.anchor)
 
     @contextmanager
     def claim(self, path: Path) -> Iterator[None]:
-        descriptor = _open_lock(path)
+        descriptor = _open_lock(path, self.anchor)
         try:
             _acquire_lock(descriptor, fcntl.LOCK_EX)
             yield
@@ -853,7 +872,11 @@ class PracticeStore:
             os.close(descriptor)
 
 
-def _publish_json(path: Path, value: dict[str, Any]) -> None:
+def _publish_json(
+    path: Path,
+    value: dict[str, Any],
+    anchor: ProjectAnchor,
+) -> None:
     content = _json_text(value)
     if len(content.encode("utf-8")) > _MAX_RECORD_BYTES:
         raise PracticeError(
@@ -867,15 +890,20 @@ def _publish_json(path: Path, value: dict[str, Any]) -> None:
             stage_prefix=".practice-record-",
             mode=0o600,
             sync_directory=True,
+            anchor=anchor,
         )
     except TargetOccupiedError:
-        if _read_json(path) != value:
+        if _read_json(path, anchor) != value:
             raise _integrity_error() from None
     except OSError:
         raise _integrity_error() from None
 
 
-def _replace_json(path: Path, value: dict[str, Any]) -> None:
+def _replace_json(
+    path: Path,
+    value: dict[str, Any],
+    anchor: ProjectAnchor,
+) -> None:
     content = _json_text(value)
     if len(content.encode("utf-8")) > _MAX_RECORD_BYTES:
         raise PracticeError(
@@ -889,14 +917,20 @@ def _replace_json(path: Path, value: dict[str, Any]) -> None:
             stage_prefix=".practice-reset-",
             prepublish=_guard_leaf,
             sync_directory=True,
+            anchor=anchor,
         )
     except OSError:
         raise _integrity_error() from None
 
 
-def _read_json(path: Path) -> dict[str, Any]:
+def _read_json(path: Path, anchor: ProjectAnchor) -> dict[str, Any]:
     try:
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with anchor.parent(path) as (parent_fd, leaf):
+            descriptor = os.open(
+                leaf,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
     except FileNotFoundError:
         raise PracticeError(
             "practice_unavailable",
@@ -967,63 +1001,49 @@ def _guard_leaf(parent_fd: int, leaf: str) -> None:
         raise _integrity_error()
 
 
-def _ensure_private_directory(path: Path) -> None:
+def _ensure_private_directory(path: Path, anchor: ProjectAnchor) -> None:
     try:
-        path.mkdir(mode=0o700)
-    except FileExistsError:
-        pass
-    _require_private_directory(path)
-
-
-def _require_private_directory(path: Path) -> None:
-    try:
-        info = path.lstat()
+        with anchor.directory(anchor.relative(path), create=True):
+            pass
     except OSError:
         raise _integrity_error() from None
-    if (
-        not stat.S_ISDIR(info.st_mode)
-        or info.st_uid != os.getuid()
-        or stat.S_IMODE(info.st_mode) != 0o700
-    ):
-        raise _integrity_error()
 
 
-def _directory_identity(path: Path) -> tuple[int, int]:
-    _require_private_directory(path)
+def _require_private_directory(path: Path, anchor: ProjectAnchor) -> None:
     try:
-        descriptor = os.open(
-            path,
-            os.O_RDONLY
-            | getattr(os, "O_DIRECTORY", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
-        )
+        with anchor.directory(anchor.relative(path)):
+            pass
     except OSError:
         raise _integrity_error() from None
+
+
+def _directory_identity(path: Path, anchor: ProjectAnchor) -> tuple[int, int]:
     try:
-        opened = os.fstat(descriptor)
-        named = path.stat(follow_symlinks=False)
-        if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
-            raise _integrity_error()
-        return opened.st_dev, opened.st_ino
-    finally:
-        os.close(descriptor)
+        with anchor.directory(anchor.relative(path)) as descriptor:
+            opened = os.fstat(descriptor)
+            return opened.st_dev, opened.st_ino
+    except OSError:
+        raise _integrity_error() from None
 
 
 def _require_directory_identity(
     path: Path,
     expected: tuple[int, int],
+    anchor: ProjectAnchor,
 ) -> None:
-    if _directory_identity(path) != expected:
+    if _directory_identity(path, anchor) != expected:
         raise _integrity_error()
 
 
-def _open_lock(path: Path) -> int:
+def _open_lock(path: Path, anchor: ProjectAnchor) -> int:
     try:
-        descriptor = os.open(
-            path,
-            os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-        )
+        with anchor.parent(path) as (parent_fd, leaf):
+            descriptor = os.open(
+                leaf,
+                os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=parent_fd,
+            )
     except OSError:
         raise _integrity_error() from None
     info = os.fstat(descriptor)
@@ -1054,14 +1074,13 @@ def _acquire_lock(descriptor: int, mode: int) -> None:
             time.sleep(0.01)
 
 
-def _inventory_directory(path: Path) -> tuple[int, int, tuple[tuple[str, bytes], ...]]:
+def _inventory_directory(
+    path: Path,
+    anchor: ProjectAnchor,
+) -> tuple[int, int, tuple[tuple[str, bytes], ...]]:
     try:
-        descriptor = os.open(
-            path,
-            os.O_RDONLY
-            | getattr(os, "O_DIRECTORY", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
-        )
+        context = anchor.directory(anchor.relative(path))
+        descriptor = context.__enter__()
     except OSError:
         raise _integrity_error() from None
     try:
@@ -1123,30 +1142,22 @@ def _inventory_directory(path: Path) -> tuple[int, int, tuple[tuple[str, bytes],
             leaves.append((name, hashlib.sha256(payload).digest()))
         return count, byte_count, tuple(leaves)
     finally:
-        os.close(descriptor)
+        context.__exit__(None, None, None)
 
 
-def _directory_is_empty(path: Path) -> bool:
+def _directory_is_empty(path: Path, anchor: ProjectAnchor) -> bool:
     try:
-        descriptor = os.open(
-            path,
-            os.O_RDONLY
-            | getattr(os, "O_DIRECTORY", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
-        )
+        with anchor.directory(anchor.relative(path)) as descriptor:
+            info = os.fstat(descriptor)
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o700
+            ):
+                raise _integrity_error()
+            return not os.listdir(descriptor)
     except OSError:
         raise _integrity_error() from None
-    try:
-        info = os.fstat(descriptor)
-        if (
-            not stat.S_ISDIR(info.st_mode)
-            or info.st_uid != os.getuid()
-            or stat.S_IMODE(info.st_mode) != 0o700
-        ):
-            raise _integrity_error()
-        return not os.listdir(descriptor)
-    finally:
-        os.close(descriptor)
 
 
 def _removed_inventory(before: dict[str, Any]) -> dict[str, Any]:
@@ -1168,9 +1179,10 @@ def _removed_inventory(before: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _path_exists(path: Path) -> bool:
+def _path_exists(path: Path, anchor: ProjectAnchor) -> bool:
     try:
-        path.lstat()
+        with anchor.parent(path) as (parent_fd, leaf):
+            os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
     except FileNotFoundError:
         return False
     except OSError:
@@ -1178,31 +1190,22 @@ def _path_exists(path: Path) -> bool:
     return True
 
 
-def _sync_directory(path: Path) -> None:
+def _sync_directory(path: Path, anchor: ProjectAnchor) -> None:
     try:
-        descriptor = os.open(
-            path,
-            os.O_RDONLY
-            | getattr(os, "O_DIRECTORY", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
-        )
-        try:
+        with anchor.directory(anchor.relative(path)) as descriptor:
             os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
     except OSError:
         raise _integrity_error() from None
 
 
-def _rename_directory(parent: Path, source: str, target: str) -> None:
+def _rename_directory(
+    parent: Path,
+    source: str,
+    target: str,
+    anchor: ProjectAnchor,
+) -> None:
     try:
-        descriptor = os.open(
-            parent,
-            os.O_RDONLY
-            | getattr(os, "O_DIRECTORY", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
-        )
-        try:
+        with anchor.directory(anchor.relative(parent)) as descriptor:
             try:
                 os.stat(target, dir_fd=descriptor, follow_symlinks=False)
             except FileNotFoundError:
@@ -1211,8 +1214,6 @@ def _rename_directory(parent: Path, source: str, target: str) -> None:
                 raise _integrity_error()
             os.rename(source, target, src_dir_fd=descriptor, dst_dir_fd=descriptor)
             os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
     except PracticeError:
         raise
     except OSError:
@@ -1224,14 +1225,11 @@ def _remove_private_tree(
     leaf: str,
     *,
     expected_identity: tuple[int, int],
+    anchor: ProjectAnchor,
 ) -> None:
     try:
-        parent_fd = os.open(
-            parent,
-            os.O_RDONLY
-            | getattr(os, "O_DIRECTORY", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
-        )
+        context = anchor.directory(anchor.relative(parent))
+        parent_fd = context.__enter__()
     except OSError:
         raise _integrity_error() from None
     try:
@@ -1246,7 +1244,7 @@ def _remove_private_tree(
         )
         os.fsync(parent_fd)
     finally:
-        os.close(parent_fd)
+        context.__exit__(None, None, None)
 
 
 def _remove_tree_at(
@@ -1474,8 +1472,18 @@ def _validate_receipt(
         raise _integrity_error()
 
 
-def _entry_count(path: Path) -> int:
-    return sum(1 for item in path.iterdir() if item.name.endswith(".json"))
+def _json_names(path: Path, anchor: ProjectAnchor) -> tuple[str, ...]:
+    try:
+        with anchor.directory(anchor.relative(path)) as descriptor:
+            return tuple(
+                sorted(name for name in os.listdir(descriptor) if name.endswith(".json"))
+            )
+    except OSError:
+        raise _integrity_error() from None
+
+
+def _entry_count(path: Path, anchor: ProjectAnchor) -> int:
+    return len(_json_names(path, anchor))
 
 
 def _valid_identifier(value: str, prefix: str, digest_length: int) -> bool:

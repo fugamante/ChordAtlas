@@ -1,17 +1,22 @@
 # ChordAtlas User Manual
 
-ChordAtlas currently has two local interfaces:
+ChordAtlas has two local interfaces:
 
-- ChordAtlas Studio imports an authorized PCM16 WAV, displays its waveform,
-  provides synchronized transport controls, and can create a read-only machine
-  chord draft.
-- The `chordchart` command writes structured guitar charts in YAML and exports
-  Markdown, plain text, or JSON. It can also compare claims about different
-  recordings, such as studio, live, demo, remaster, or isolated-stem versions.
+- ChordAtlas Studio imports an authorized PCM16 WAV from a local file or the
+  narrow direct-HTTPS adapter, displays synchronized waveform and chord
+  hypotheses, preserves immutable human review revisions, promotes one
+  explicitly approved revision into SongChart 1.0.0, exports the approved
+  chart, and supports private approval-bound practice.
+- The `chordchart` command creates and validates structured guitar charts in
+  YAML and exports Markdown, plain text, or JSON. It can also compare claims
+  about different recordings, such as studio, live, demo, remaster, or
+  isolated-stem versions.
 
 Studio is a browser interface backed by a loopback-only process on your device.
-It does not upload audio. Its automatic output remains visibly unreviewed; the
-CLI remains the reviewed chart and export interface.
+It does not upload audio. Automatic output remains visibly unreviewed until the
+user corrects it, finishes a review revision, and separately approves that
+exact revision. Media, analysis, review, approval, acquisition, and practice
+records remain private and outside public SongChart exports.
 
 ## 1. What You Need
 

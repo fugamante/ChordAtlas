@@ -1051,3 +1051,62 @@ def test_review_rejects_replaced_fixed_storage_ancestor(tmp_path: Path) -> None:
 
     assert integrity.value.code == "review_storage_integrity"
     assert list(replacement.iterdir()) == []
+
+
+def test_review_rejects_intermediate_project_ancestor_replacement(
+    tmp_path: Path,
+) -> None:
+    container = tmp_path / "selected"
+    project = container / "project"
+    project.mkdir(parents=True)
+    ProjectMediaStore.initialize(project)
+    store = ReviewStore.initialize(project)
+    container.rename(tmp_path / "selected-original")
+    project.mkdir(parents=True)
+    replacement = project / ".chordatlas"
+    replacement.mkdir(mode=0o700)
+
+    with pytest.raises(ReviewError) as rejected:
+        store.create_session(
+            source_id="src_" + ("a" * 32),
+            analysis_run_id="run_" + ("b" * 32),
+            base=candidate_timeline(),
+            idempotency_key="create-review-replaced-project",
+            created_at="2026-07-23T00:00:00+00:00",
+        )
+
+    assert rejected.value.code == "review_storage_integrity"
+    assert list(replacement.iterdir()) == []
+
+
+def test_review_record_read_is_bounded_during_concurrent_growth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id, _base = provision_success(tmp_path)
+    service = ReviewService(tmp_path)
+    created = service.create(run_id, idempotency_key="create-review-growth")
+    session_id = created["session"]["session_id"]
+    path = service.store.sessions / session_id / "session.json"
+    identity = (path.stat().st_dev, path.stat().st_ino)
+    original_read = review_store_module.os.read
+    grew = False
+
+    def grow_after_first_read(descriptor: int, count: int) -> bytes:
+        nonlocal grew
+        chunk = original_read(descriptor, count)
+        info = os.fstat(descriptor)
+        if not grew and (info.st_dev, info.st_ino) == identity:
+            grew = True
+            with path.open("ab") as handle:
+                handle.write(b" " * (review_store_module._MAX_JSON_BYTES + 1))
+                handle.flush()
+                os.fsync(handle.fileno())
+        return chunk
+
+    monkeypatch.setattr(review_store_module.os, "read", grow_after_first_read)
+    with pytest.raises(ReviewError) as rejected:
+        service.get(session_id)
+
+    assert grew is True
+    assert rejected.value.code == "review_storage_integrity"

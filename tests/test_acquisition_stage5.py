@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import io
+import hashlib
 import importlib
+import io
 import json
 import math
 import os
@@ -478,6 +479,87 @@ def test_idempotency_survives_service_restart(tmp_path: Path) -> None:
     second = AcquisitionService(tmp_path, transport=second_transport)
     assert second.start(**args) == run_id
     assert second_transport.calls == []
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ("extra_key", "key_digest", "fingerprint", "unbound_run"),
+)
+def test_idempotency_record_tampering_fails_closed(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AcquisitionStore.initialize(tmp_path)
+    request = store.create_request(
+        normalized_url="https://audio.example/take",
+        display_name="take.wav",
+        retry_of=None,
+    )
+    key = "tamper-request"
+    fingerprint = "a" * 64
+    assert store.claim_idempotency(key, fingerprint, request.id) == request.id
+    digest = hashlib.sha256(key.encode()).hexdigest()
+    path = store.idempotency_root / f"{digest}.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if tamper == "extra_key":
+        value["unexpected"] = True
+    elif tamper == "key_digest":
+        value["key_digest"] = "b" * 64
+    elif tamper == "fingerprint":
+        value["request_fingerprint"] = "not-a-fingerprint"
+    else:
+        value["run_id"] = "acq_" + ("f" * 32)
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(AcquisitionError) as rejected:
+        store.lookup_idempotency(key, fingerprint)
+
+    assert rejected.value.code == "acquisition_storage_integrity"
+
+
+@pytest.mark.parametrize("failure", ("flush", "close"))
+def test_staging_cleanup_runs_when_handle_flush_or_close_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    service = AcquisitionService(tmp_path, transport=FakeTransport())
+    original = service.media.open_private_stage
+
+    class FailingHandle:
+        def __init__(self, handle) -> None:
+            self.handle = handle
+
+        def __getattr__(self, name):
+            return getattr(self.handle, name)
+
+        def flush(self) -> None:
+            if failure == "flush":
+                raise OSError("synthetic flush failure")
+            self.handle.flush()
+
+        def close(self) -> None:
+            self.handle.close()
+            if failure == "close":
+                raise OSError("synthetic close failure")
+
+    monkeypatch.setattr(
+        service.media,
+        "open_private_stage",
+        lambda path, *, writable: FailingHandle(
+            original(path, writable=writable)
+        ),
+    )
+    run_id = service.start(
+        url="https://audio.example/take",
+        display_name="take.wav",
+        authorization_confirmed=True,
+    )
+    state = service.wait(run_id, 5)
+
+    assert state["status"] == ("failed" if failure == "flush" else "succeeded")
+    assert list(service.media.tmp_root.iterdir()) == []
 
 
 def test_concurrent_services_converge_on_one_idempotent_acquisition(
@@ -970,6 +1052,30 @@ def test_acquisition_rejects_replaced_fixed_storage_ancestor(tmp_path: Path) -> 
         )
 
     assert integrity.value.code == "acquisition_storage_integrity"
+    assert list(replacement.iterdir()) == []
+
+
+def test_acquisition_rejects_intermediate_project_ancestor_replacement(
+    tmp_path: Path,
+) -> None:
+    container = tmp_path / "selected"
+    project = container / "project"
+    project.mkdir(parents=True)
+    ProjectMediaStore.initialize(project)
+    store = AcquisitionStore.initialize(project)
+    container.rename(tmp_path / "selected-original")
+    project.mkdir(parents=True)
+    replacement = project / ".chordatlas"
+    replacement.mkdir(mode=0o700)
+
+    with pytest.raises(AcquisitionError) as rejected:
+        store.create_request(
+            normalized_url="https://audio.example/take",
+            display_name="take.wav",
+            retry_of=None,
+        )
+
+    assert rejected.value.code == "acquisition_storage_integrity"
     assert list(replacement.iterdir()) == []
 
 

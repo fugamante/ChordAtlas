@@ -24,9 +24,8 @@ class AcquisitionStore:
     def __init__(self, project_root: Path) -> None:
         self.project_root = project_root.resolve(strict=True)
         self.root = self.project_root / ".chordatlas"
-        _require_private_directory(self.root)
         try:
-            self.anchor = ProjectAnchor(self.root)
+            self.anchor = ProjectAnchor.for_project(self.project_root)
         except OSError:
             raise _integrity_error() from None
         self.acquisitions_root = self.root / "acquisitions"
@@ -49,7 +48,7 @@ class AcquisitionStore:
             store.idempotency_root,
         ):
             _ensure_private_directory(path, store.anchor)
-        _require_private_directory(store.tmp_root)
+        _require_private_directory_anchored(store.tmp_root, store.anchor)
         return store
 
     def _verify_anchor(self) -> None:
@@ -101,6 +100,8 @@ class AcquisitionStore:
                 "Idempotency key is invalid.",
                 retryable=False,
             )
+        _validate_fingerprint(fingerprint)
+        _validate_run_id(run_id)
         digest = hashlib.sha256(key.encode()).hexdigest()
         path = self.idempotency_root / f"{digest}.json"
         value = {
@@ -108,15 +109,10 @@ class AcquisitionStore:
             "request_fingerprint": fingerprint,
             "run_id": run_id,
         }
-        if path.exists():
+        if _path_exists(path, self.anchor):
             existing = _read_json(path, self.anchor)
-            if existing["request_fingerprint"] != fingerprint:
-                raise AcquisitionError(
-                    "idempotency_conflict",
-                    "The idempotency key was already used for another acquisition.",
-                    retryable=False,
-                )
-            return str(existing["run_id"])
+            return self._validated_idempotency(existing, digest, fingerprint)
+        self.load_request(run_id)
         try:
             _publish_json_exclusive(self.anchor, path, value)
             return run_id
@@ -125,13 +121,46 @@ class AcquisitionStore:
             # probe and publication. Read the winner through the same integrity
             # checks and converge only when its request fingerprint matches.
             existing = _read_json(path, self.anchor)
-            if existing["request_fingerprint"] != fingerprint:
-                raise AcquisitionError(
-                    "idempotency_conflict",
-                    "The idempotency key was already used for another acquisition.",
-                    retryable=False,
-                ) from None
-            return str(existing["run_id"])
+            return self._validated_idempotency(existing, digest, fingerprint)
+
+    def lookup_idempotency(self, key: str, fingerprint: str) -> str | None:
+        self._verify_anchor()
+        if not 8 <= len(key) <= 128 or not key.isascii() or any(ord(c) < 32 for c in key):
+            raise AcquisitionError(
+                "invalid_idempotency_key",
+                "Idempotency key is invalid.",
+                retryable=False,
+            )
+        _validate_fingerprint(fingerprint)
+        digest = hashlib.sha256(key.encode()).hexdigest()
+        path = self.idempotency_root / f"{digest}.json"
+        if not _path_exists(path, self.anchor):
+            return None
+        return self._validated_idempotency(_read_json(path, self.anchor), digest, fingerprint)
+
+    def _validated_idempotency(
+        self,
+        value: dict[str, Any],
+        digest: str,
+        fingerprint: str,
+    ) -> str:
+        if (
+            set(value) != {"key_digest", "request_fingerprint", "run_id"}
+            or value.get("key_digest") != digest
+            or not _valid_fingerprint(value.get("request_fingerprint"))
+            or not isinstance(value.get("run_id"), str)
+        ):
+            raise _integrity_error()
+        existing_run = str(value["run_id"])
+        _validate_run_id(existing_run)
+        self.load_request(existing_run)
+        if value["request_fingerprint"] != fingerprint:
+            raise AcquisitionError(
+                "idempotency_conflict",
+                "The idempotency key was already used for another acquisition.",
+                retryable=False,
+            )
+        return existing_run
 
     def load_request(self, run_id: str) -> AcquisitionRequest:
         self._verify_anchor()
@@ -409,6 +438,21 @@ class AcquisitionStore:
 def _validate_run_id(value: str) -> None:
     if not re_full_acquisition(value):
         raise AcquisitionError("invalid_acquisition_id", "Acquisition identifier is invalid.")
+
+
+def _validate_fingerprint(value: str) -> None:
+    if not _valid_fingerprint(value):
+        raise AcquisitionError(
+            "acquisition_storage_integrity",
+            "Private acquisition storage failed an integrity check.",
+            retryable=False,
+        )
+
+
+def _valid_fingerprint(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(
+        character in "0123456789abcdef" for character in value
+    )
 
 
 def re_full_acquisition(value: str) -> bool:

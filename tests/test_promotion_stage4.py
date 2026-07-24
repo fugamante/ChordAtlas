@@ -774,6 +774,29 @@ def test_private_record_hardlink_and_symlink_lock_fail_closed(tmp_path: Path) ->
     assert symlinked.value.code == "promotion_storage_integrity"
 
 
+def test_promotion_publication_rejects_intermediate_project_ancestor_replacement(
+    tmp_path: Path,
+) -> None:
+    container = tmp_path / "selected"
+    project = container / "project"
+    project.mkdir(parents=True)
+    ready, _review = _ready(project)
+    service = PromotionService(project)
+    container.rename(tmp_path / "selected-original")
+    project.mkdir(parents=True)
+    replacement = project / ".chordatlas"
+    replacement.mkdir(mode=0o700)
+
+    with pytest.raises(PromotionError) as rejected:
+        service.store._publish(
+            service.store.approvals / ("apr_" + ("a" * 64) + ".json"),
+            {"session_id": ready["session"]["session_id"]},
+        )
+
+    assert rejected.value.code == "promotion_storage_integrity"
+    assert list(replacement.iterdir()) == []
+
+
 def test_approval_rejects_same_issue_set_for_an_unseen_changed_result(
     tmp_path: Path,
 ) -> None:

@@ -4,12 +4,17 @@ import fcntl
 import json
 import os
 import stat
-import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from chordatlas._fs import (
+    ProjectAnchor,
+    TargetOccupiedError,
+    create_text_exclusive,
+    replace_text,
+)
 from chordatlas.analysis.models import (
     AnalysisError,
     AnalysisRun,
@@ -29,7 +34,11 @@ _MAX_JSON_BYTES = 8 * 1024 * 1024
 class AnalysisStore:
     def __init__(self, project_root: Path) -> None:
         self.project_root = project_root.resolve(strict=True)
-        self.root = self.project_root / ".chordatlas" / "analysis"
+        try:
+            self.anchor = ProjectAnchor.for_project(self.project_root)
+        except OSError:
+            raise _integrity_error() from None
+        self.root = self.anchor.root / "analysis"
         self.specs = self.root / "specs" / "sha256"
         self.runs = self.root / "runs"
         self.timelines = self.root / "timelines" / "sha256"
@@ -41,8 +50,6 @@ class AnalysisStore:
     @classmethod
     def initialize(cls, project_root: Path) -> AnalysisStore:
         store = cls(project_root)
-        media_root = store.project_root / ".chordatlas"
-        _require_dir(media_root)
         for path in (
             store.root,
             store.root / "specs",
@@ -53,7 +60,7 @@ class AnalysisStore:
             store.claims,
             store.tmp,
         ):
-            _ensure_dir(path)
+            _ensure_dir(path, store.anchor)
         return store
 
     def publish_spec(self, spec: AnalysisSpec) -> None:
@@ -116,8 +123,8 @@ class AnalysisStore:
             )
         self.publish_spec(spec)
         run_dir = self.runs / run.id
-        _ensure_dir(run_dir)
-        _ensure_dir(run_dir / "events")
+        _ensure_dir(run_dir, self.anchor)
+        _ensure_dir(run_dir / "events", self.anchor)
         self._publish_immutable(run_dir / "request.json", run.to_record_mapping())
         state = RunState(run.id, 0, "queued", _utc_now())
         self._publish_immutable(run_dir / "events" / "00000000.json", state.to_record_mapping())
@@ -143,7 +150,10 @@ class AnalysisStore:
         _validate_run_id(run_id)
         run_dir = self.runs / run_id
         try:
-            events = sorted((run_dir / "events").glob("*.json"))
+            events = [
+                run_dir / "events" / name
+                for name in _json_names(run_dir / "events", self.anchor)
+            ]
             if not events:
                 raise _integrity_error()
             latest = _state_from_mapping(self._read_json(events[-1]))
@@ -255,10 +265,14 @@ class AnalysisStore:
 
     def list_runs(self, *, source_id: str | None = None) -> list[dict[str, Any]]:
         values = []
-        for path in sorted(self.runs.glob("run_*")):
-            if path.is_symlink() or not path.is_dir():
-                raise _integrity_error()
-            if not (path / "request.json").exists() or not (path / "state.json").exists():
+        for name in _entry_names(self.runs, self.anchor):
+            if not name.startswith("run_"):
+                continue
+            path = self.runs / name
+            _require_dir(path, self.anchor)
+            if not _path_exists(
+                path / "request.json", self.anchor
+            ) or not _path_exists(path / "state.json", self.anchor):
                 continue
             run = self.load_run(path.name)
             if source_id is not None and run.source_id != source_id:
@@ -272,14 +286,20 @@ class AnalysisStore:
         """Mark nonterminal attempts failed when their owning process is gone."""
 
         active = self.claims / "active"
-        descriptor = _open_claim_file(active)
+        descriptor = _open_claim_file(active, self.anchor)
         try:
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 return
-            for path in sorted(self.runs.glob("run_*")):
-                if not (path / "request.json").exists() or not (path / "state.json").exists():
+            for name in _entry_names(self.runs, self.anchor):
+                if not name.startswith("run_"):
+                    continue
+                path = self.runs / name
+                _require_dir(path, self.anchor)
+                if not _path_exists(
+                    path / "request.json", self.anchor
+                ) or not _path_exists(path / "state.json", self.anchor):
                     continue
                 state = self.load_state(path.name)
                 if state.status in {"queued", "running", "cancel_requested"}:
@@ -307,7 +327,7 @@ class AnalysisStore:
     def claim(self, run_id: str) -> None:
         _validate_run_id(run_id)
         path = self.claims / "active"
-        descriptor = _open_claim_file(path)
+        descriptor = _open_claim_file(path, self.anchor)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -322,7 +342,7 @@ class AnalysisStore:
             handle.flush()
             os.fsync(handle.fileno())
         self._claim_handles[run_id] = descriptor
-        _sync_dir(path.parent)
+        _sync_dir(path.parent, self.anchor)
 
     def release_claim(self, run_id: str) -> None:
         descriptor = self._claim_handles.pop(run_id, None)
@@ -347,45 +367,83 @@ class AnalysisStore:
             raise AnalysisError("invalid_analysis_id", "Analysis artifact identifier is invalid.")
         parent = root / digest[:2]
         if create:
-            _ensure_dir(parent)
+            _ensure_dir(parent, self.anchor)
         else:
-            _require_dir(parent)
+            _require_dir(parent, self.anchor)
         return parent / f"{digest}.json"
 
     def _publish_immutable(self, path: Path, value: dict[str, Any]) -> None:
         payload = json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n"
-        stage = _stage_text(self.tmp, payload)
         try:
-            try:
-                os.link(stage, path, follow_symlinks=False)
-                _sync_dir(path.parent)
-            except FileExistsError:
-                if self._read_json(path) != value:
-                    raise _integrity_error() from None
-        finally:
-            stage.unlink(missing_ok=True)
+            create_text_exclusive(
+                path,
+                payload,
+                stage_prefix=".analysis-",
+                mode=0o600,
+                sync_directory=True,
+                anchor=self.anchor,
+            )
+        except TargetOccupiedError:
+            if self._read_json(path) != value:
+                raise _integrity_error() from None
+        except OSError:
+            raise _integrity_error() from None
 
     def _replace_state(self, path: Path, state: RunState) -> None:
         payload = json.dumps(state.to_record_mapping(), indent=2, sort_keys=True) + "\n"
-        stage = _stage_text(self.tmp, payload)
         try:
-            os.replace(stage, path)
-            os.chmod(path, 0o600)
-            _sync_dir(path.parent)
-        finally:
-            stage.unlink(missing_ok=True)
+            replace_text(
+                path,
+                payload,
+                stage_prefix=".analysis-state-",
+                sync_directory=True,
+                anchor=self.anchor,
+                mode=0o600,
+            )
+        except OSError:
+            raise _integrity_error() from None
 
-    @staticmethod
-    def _read_json(path: Path) -> dict[str, Any]:
-        if path.is_symlink() or not path.is_file():
-            raise _integrity_error()
-        _require_file(path)
-        if path.stat().st_size > _MAX_JSON_BYTES:
-            raise _integrity_error()
+    def _read_json(self, path: Path) -> dict[str, Any]:
         try:
-            value = json.loads(path.read_text(encoding="utf-8"))
+            with self.anchor.parent(path) as (parent_fd, leaf):
+                descriptor = os.open(
+                    leaf,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_fd,
+                )
+        except OSError:
+            raise _integrity_error() from None
+        try:
+            entry = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(entry.st_mode)
+                or entry.st_uid != os.getuid()
+                or stat.S_IMODE(entry.st_mode) != 0o600
+                or entry.st_nlink != 1
+                or entry.st_size > _MAX_JSON_BYTES
+            ):
+                raise _integrity_error()
+            payload = bytearray()
+            while len(payload) <= _MAX_JSON_BYTES:
+                chunk = os.read(
+                    descriptor,
+                    min(64 * 1024, _MAX_JSON_BYTES + 1 - len(payload)),
+                )
+                if not chunk:
+                    break
+                payload.extend(chunk)
+            after = os.fstat(descriptor)
+            if (
+                len(payload) > _MAX_JSON_BYTES
+                or (entry.st_dev, entry.st_ino, entry.st_size)
+                != (after.st_dev, after.st_ino, after.st_size)
+            ):
+                raise _integrity_error()
+            value = json.loads(payload.decode("utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
             raise _integrity_error() from None
+        finally:
+            os.close(descriptor)
         if not isinstance(value, dict):
             raise _integrity_error()
         return value
@@ -436,21 +494,11 @@ def _validate_run_id(value: str) -> None:
         raise AnalysisError("invalid_run_id", "Analysis run identifier is invalid.") from None
 
 
-def _stage_text(root: Path, payload: str) -> Path:
-    descriptor, name = tempfile.mkstemp(prefix=".analysis-", suffix=".tmp", dir=root)
-    path = Path(name)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        os.fchmod(handle.fileno(), 0o600)
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
-    return path
-
-
-def _open_claim_file(path: Path) -> int:
+def _open_claim_file(path: Path, anchor: ProjectAnchor) -> int:
     flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(path, flags, 0o600)
+        with anchor.parent(path) as (parent_fd, leaf):
+            descriptor = os.open(leaf, flags, 0o600, dir_fd=parent_fd)
     except OSError:
         raise _integrity_error() from None
     entry = os.fstat(descriptor)
@@ -465,40 +513,53 @@ def _open_claim_file(path: Path) -> int:
     return descriptor
 
 
-def _ensure_dir(path: Path) -> None:
+def _ensure_dir(path: Path, anchor: ProjectAnchor) -> None:
     try:
-        path.mkdir(mode=0o700)
-    except FileExistsError:
-        pass
-    _require_dir(path)
+        with anchor.directory(anchor.relative(path), create=True):
+            pass
+    except OSError:
+        raise _integrity_error() from None
 
 
-def _require_dir(path: Path) -> None:
+def _require_dir(path: Path, anchor: ProjectAnchor) -> None:
     try:
-        entry = path.lstat()
+        with anchor.directory(anchor.relative(path)):
+            pass
+    except OSError:
+        raise AnalysisError(
+            "analysis_storage_missing", "Analysis storage is not initialized."
+        ) from None
+
+
+def _path_exists(path: Path, anchor: ProjectAnchor) -> bool:
+    try:
+        with anchor.parent(path) as (parent_fd, leaf):
+            os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        return True
     except FileNotFoundError:
-        raise AnalysisError("analysis_storage_missing", "Analysis storage is not initialized.") from None
-    if (
-        stat.S_ISLNK(entry.st_mode)
-        or not stat.S_ISDIR(entry.st_mode)
-        or entry.st_uid != os.getuid()
-        or stat.S_IMODE(entry.st_mode) != 0o700
-    ):
-        raise _integrity_error()
+        return False
+    except OSError:
+        raise _integrity_error() from None
 
 
-def _require_file(path: Path) -> None:
-    entry = path.stat()
-    if entry.st_uid != os.getuid() or stat.S_IMODE(entry.st_mode) != 0o600:
-        raise _integrity_error()
-
-
-def _sync_dir(path: Path) -> None:
-    descriptor = os.open(path, getattr(os, "O_DIRECTORY", 0) | os.O_RDONLY)
+def _entry_names(path: Path, anchor: ProjectAnchor) -> tuple[str, ...]:
     try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+        with anchor.directory(anchor.relative(path)) as descriptor:
+            return tuple(sorted(os.listdir(descriptor)))
+    except OSError:
+        raise _integrity_error() from None
+
+
+def _json_names(path: Path, anchor: ProjectAnchor) -> tuple[str, ...]:
+    return tuple(name for name in _entry_names(path, anchor) if name.endswith(".json"))
+
+
+def _sync_dir(path: Path, anchor: ProjectAnchor) -> None:
+    try:
+        with anchor.directory(anchor.relative(path)) as descriptor:
+            os.fsync(descriptor)
+    except OSError:
+        raise _integrity_error() from None
 
 
 def _integrity_error() -> AnalysisError:

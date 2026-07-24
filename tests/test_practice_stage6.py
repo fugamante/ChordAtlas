@@ -600,6 +600,7 @@ def test_ambiguous_complete_receipt_branches_fail_closed(tmp_path: Path) -> None
             "parent_attempt_id": parent.id,
             "generation": 2,
         },
+        practice.store.anchor,
     )
 
     with pytest.raises(PracticeError) as ambiguous:
@@ -769,10 +770,10 @@ def test_interrupted_initial_publication_is_invisible_and_retryable(
     else:
         target_parent = store.heads if failure_point == "head" else store.sessions
 
-        def fail_at(path: Path, value: dict) -> None:
+        def fail_at(path: Path, value: dict, anchor) -> None:
             if path.parent == target_parent:
                 raise OSError(f"injected {failure_point} failure")
-            original_json(path, value)
+            original_json(path, value, anchor)
 
         monkeypatch.setattr(practice_store_module, "_publish_json", fail_at)
 
@@ -815,6 +816,7 @@ def test_oversized_practice_record_is_rejected_before_publication(
         practice_store_module._publish_json(
             path,
             {"payload": "x" * practice_store_module._MAX_RECORD_BYTES},
+            None,
         )
     assert oversized.value.code == "practice_limit"
     assert not path.exists()
@@ -1356,14 +1358,14 @@ def test_reset_crash_points_converge_to_one_empty_visible_namespace(
     def fail_rename(*_args) -> None:
         raise OSError("injected before quarantine")
 
-    def fail_recreation(path: Path) -> None:
+    def fail_recreation(path: Path, anchor) -> None:
         nonlocal injected
         if not injected and path == practice.store.sessions:
             injected = True
             raise OSError("injected during recreation")
-        original_ensure(path)
+        original_ensure(path, anchor)
 
-    def fail_replace(path: Path, value: dict) -> None:
+    def fail_replace(path: Path, value: dict, anchor) -> None:
         nonlocal injected
         phase = value.get("phase")
         should_fail = (
@@ -1373,7 +1375,7 @@ def test_reset_crash_points_converge_to_one_empty_visible_namespace(
         if not injected and should_fail:
             injected = True
             raise OSError(f"injected {fault}")
-        original_replace(path, value)
+        original_replace(path, value, anchor)
 
     if fault == "before_quarantine":
         monkeypatch.setattr(practice_store_module, "_rename_directory", fail_rename)
@@ -1496,3 +1498,29 @@ def test_reset_recovery_never_purges_replacement_quarantine(
     usage = recovered.usage()
     assert usage["categories"]["sessions"]["count"] == 0
     assert usage["reset_allowed"] is False
+
+
+def test_reset_rejects_intermediate_project_ancestor_replacement(
+    tmp_path: Path,
+) -> None:
+    container = tmp_path / "selected"
+    project = container / "project"
+    project.mkdir(parents=True)
+    practice, _promotion, _media, _source_id, approval_id = approved_fixture(project)
+    practice.create(approval_id, idempotency_key="stage6-ancestor-create")
+    before = practice.usage()
+    container.rename(tmp_path / "selected-original")
+    replacement = project / ".chordatlas" / "private" / "practice"
+    replacement.mkdir(mode=0o700, parents=True)
+    sentinel = replacement / "preserve.txt"
+    sentinel.write_text("outside selected project", encoding="utf-8")
+
+    with pytest.raises(PracticeError) as rejected:
+        practice.reset(
+            expected_token=before["token"],
+            idempotency_key="stage6-ancestor-reset",
+            confirmation="CLEAR ALL PRACTICE HISTORY",
+        )
+
+    assert rejected.value.code == "practice_storage_integrity"
+    assert sentinel.read_text(encoding="utf-8") == "outside selected project"

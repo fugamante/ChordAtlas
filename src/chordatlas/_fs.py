@@ -26,7 +26,7 @@ class PublishedCleanupError(OSError):
 class ProjectAnchor:
     """Pin one private project directory and resolve descendants with openat."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, expected_mode: int | None = 0o700) -> None:
         self.root = root
         flags = (
             os.O_RDONLY
@@ -39,12 +39,60 @@ class ProjectAnchor:
             os.close(self._descriptor)
             raise NotADirectoryError(root)
         self._identity = (info.st_dev, info.st_ino, info.st_uid)
+        self._expected_mode = (
+            stat.S_IMODE(info.st_mode) if expected_mode is None else expected_mode
+        )
+        self._ancestor: tuple[ProjectAnchor, Path] | None = None
         self._finalizer = finalize(self, os.close, self._descriptor)
+
+    @classmethod
+    def for_project(
+        cls,
+        project_root: Path,
+        *,
+        storage: Path | str = Path(".chordatlas"),
+        create: bool = False,
+    ) -> ProjectAnchor:
+        """Pin a private storage root through the selected project descriptor."""
+
+        project = cls(project_root, expected_mode=None)
+        relative = Path(storage)
+        try:
+            with project.directory(relative, create=create, mode=0o700) as descriptor:
+                child = cls.__new__(cls)
+                child.root = project_root / relative
+                child._descriptor = os.dup(descriptor)
+                info = os.fstat(child._descriptor)
+                child._identity = (info.st_dev, info.st_ino, info.st_uid)
+                child._expected_mode = 0o700
+                child._ancestor = (project, relative)
+                child._finalizer = finalize(child, os.close, child._descriptor)
+                return child
+        except BaseException:
+            project.close()
+            raise
 
     def close(self) -> None:
         self._finalizer()
+        if self._ancestor is not None:
+            self._ancestor[0].close()
 
     def verify(self) -> None:
+        if self._ancestor is not None:
+            ancestor, relative = self._ancestor
+            ancestor.verify()
+            try:
+                with ancestor.directory(relative, mode=0o700) as descriptor:
+                    anchored = os.fstat(descriptor)
+            except OSError:
+                raise OSError("project storage root changed") from None
+            if (
+                not stat.S_ISDIR(anchored.st_mode)
+                or (anchored.st_dev, anchored.st_ino, anchored.st_uid)
+                != self._identity
+                or stat.S_IMODE(anchored.st_mode) != self._expected_mode
+            ):
+                raise OSError("project storage root changed")
         try:
             named = self.root.lstat()
         except OSError:
@@ -54,8 +102,8 @@ class ProjectAnchor:
             not stat.S_ISDIR(named.st_mode)
             or (named.st_dev, named.st_ino, named.st_uid) != self._identity
             or (current.st_dev, current.st_ino, current.st_uid) != self._identity
-            or stat.S_IMODE(named.st_mode) != 0o700
-            or stat.S_IMODE(current.st_mode) != 0o700
+            or stat.S_IMODE(named.st_mode) != self._expected_mode
+            or stat.S_IMODE(current.st_mode) != self._expected_mode
         ):
             raise OSError("project storage root changed")
 
@@ -235,6 +283,7 @@ def replace_text(
     cleanup_reporter: CleanupReporter | None = None,
     sync_directory: bool = False,
     anchor: ProjectAnchor | None = None,
+    mode: int | None = None,
 ) -> None:
     leaf = _target_leaf(path)
     if anchor is None:
@@ -248,6 +297,7 @@ def replace_text(
             cleanup_reporter=cleanup_reporter,
             sync_directory=sync_directory,
             close_parent=True,
+            mode=mode,
         )
         return
     with anchor.parent(path) as (parent_fd, anchored_leaf):
@@ -262,6 +312,7 @@ def replace_text(
             cleanup_reporter=cleanup_reporter,
             sync_directory=sync_directory,
             close_parent=False,
+            mode=mode,
         )
 
 
@@ -275,6 +326,7 @@ def _replace_text_with_parent(
     cleanup_reporter: CleanupReporter | None,
     sync_directory: bool,
     close_parent: bool,
+    mode: int | None,
 ) -> None:
     published = False
     active_error: BaseException | None = None
@@ -287,6 +339,7 @@ def _replace_text_with_parent(
             content,
             stage_prefix=stage_prefix,
             cleanup_reporter=cleanup_reporter,
+            mode=mode,
         )
         published = True
     except BaseException as error:
@@ -368,6 +421,7 @@ def _replace_text_batch_with_parent(
                 content,
                 stage_prefix=stage_prefix,
                 cleanup_reporter=cleanup_reporter,
+                mode=None,
             )
             published = True
             if on_published is not None:
@@ -393,13 +447,14 @@ def _replace_text_at(
     *,
     stage_prefix: str,
     cleanup_reporter: CleanupReporter | None,
+    mode: int | None,
 ) -> None:
-    target_mode: int | None = None
+    target_mode = mode
     target_stat = _target_stat(parent_fd, leaf)
     if target_stat is not None:
         if stat.S_ISDIR(target_stat.st_mode):
             raise IsADirectoryError(f"destination is a directory: {leaf}")
-        if stat.S_ISREG(target_stat.st_mode):
+        if stat.S_ISREG(target_stat.st_mode) and target_mode is None:
             target_mode = stat.S_IMODE(target_stat.st_mode)
 
     staged = _stage_text(

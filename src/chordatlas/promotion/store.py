@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
-from chordatlas._fs import TargetOccupiedError, create_text_exclusive
+from chordatlas._fs import ProjectAnchor, TargetOccupiedError, create_text_exclusive
 from chordatlas.promotion.models import (
     ApprovalRecord,
     MappingConfig,
@@ -30,7 +30,11 @@ _MAX_RECEIPTS = 10_000
 class PromotionStore:
     def __init__(self, project_root: Path) -> None:
         self.project_root = project_root.resolve(strict=True)
-        self.root = self.project_root / ".chordatlas" / "promotion"
+        try:
+            self.anchor = ProjectAnchor.for_project(self.project_root)
+        except OSError:
+            raise _integrity_error() from None
+        self.root = self.anchor.root / "promotion"
         self.configs = self.root / "configs" / "sha256"
         self.results = self.root / "results" / "sha256"
         self.specs = self.root / "specs" / "sha256"
@@ -57,7 +61,7 @@ class PromotionStore:
             store.receipts,
             store.locks,
         ):
-            _ensure_dir(path)
+            _ensure_dir(path, store.anchor)
         return store
 
     def claim_receipt(
@@ -90,7 +94,7 @@ class PromotionStore:
         receipt_id = f"rcp_{key_hash}"
         path = self.receipts / f"{key_hash}.json"
         with self.claim(self.locks / "idempotency.lock"):
-            if path.exists():
+            if _path_exists(path, self.anchor):
                 value = self._read_json(path)
                 if (
                     set(value)
@@ -113,7 +117,7 @@ class PromotionStore:
                         "The idempotency key was used for a different promotion action.",
                     )
                 return str(value["recorded_at"]), True, receipt_id
-            receipt_count = sum(1 for _ in self.receipts.glob("*.json"))
+            receipt_count = len(_json_names(self.receipts, self.anchor))
             if receipt_count >= _MAX_RECEIPTS:
                 raise PromotionError(
                     "promotion_limit",
@@ -359,31 +363,32 @@ class PromotionStore:
 
     def _append_event(self, session_id: str, event: dict[str, Any]) -> None:
         directory = self.events / session_id
-        _ensure_dir(directory)
-        paths = sorted(directory.glob("*.json"))
-        if len(paths) >= _MAX_EVENTS:
+        _ensure_dir(directory, self.anchor)
+        names = _json_names(directory, self.anchor)
+        if len(names) >= _MAX_EVENTS:
             raise PromotionError(
                 "promotion_limit",
                 "This review session reached its approval event limit.",
             )
         event = {
             "promotion_event_schema_version": "1.0.0-draft",
-            "generation": len(paths),
+            "generation": len(names),
             **event,
         }
-        self._publish(directory / f"{len(paths):08d}.json", event)
+        self._publish(directory / f"{len(names):08d}.json", event)
 
     def _events_for(self, session_id: str) -> tuple[dict[str, Any], ...]:
         directory = self.events / session_id
-        if not directory.exists():
+        if not _path_exists(directory, self.anchor):
             return ()
-        _require_dir(directory)
-        paths = sorted(directory.glob("*.json"))
-        if len(paths) > _MAX_EVENTS:
+        _require_dir(directory, self.anchor)
+        names = _json_names(directory, self.anchor)
+        if len(names) > _MAX_EVENTS:
             raise _integrity_error()
         values = []
         seen_approvals: set[str] = set()
-        for generation, path in enumerate(paths):
+        for generation, name in enumerate(names):
+            path = directory / name
             value = self._read_json(path)
             kind = value.get("kind")
             expected_keys = (
@@ -439,32 +444,60 @@ class PromotionStore:
                 content,
                 stage_prefix=".promotion-",
                 mode=0o600,
+                sync_directory=True,
+                anchor=self.anchor,
             )
         except TargetOccupiedError:
             if self._read_json(path) != value:
                 raise _integrity_error() from None
+        except OSError:
+            raise _integrity_error() from None
 
     def _read_json(self, path: Path) -> dict[str, Any]:
         try:
-            info = path.lstat()
+            with self.anchor.parent(path) as (parent_fd, leaf):
+                descriptor = os.open(
+                    leaf,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_fd,
+                )
         except OSError:
             raise PromotionError(
                 "promotion_unavailable",
                 "The private promotion record is unavailable.",
             ) from None
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or info.st_uid != os.getuid()
-            or info.st_nlink != 1
-            or stat.S_IMODE(info.st_mode) & 0o077
-            or info.st_size <= 0
-            or info.st_size > _MAX_JSON_BYTES
-        ):
-            raise _integrity_error()
         try:
-            value = json.loads(path.read_text(encoding="utf-8"))
+            info = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or info.st_nlink != 1
+                or stat.S_IMODE(info.st_mode) & 0o077
+                or info.st_size <= 0
+                or info.st_size > _MAX_JSON_BYTES
+            ):
+                raise _integrity_error()
+            payload = bytearray()
+            while len(payload) <= _MAX_JSON_BYTES:
+                chunk = os.read(
+                    descriptor,
+                    min(64 * 1024, _MAX_JSON_BYTES + 1 - len(payload)),
+                )
+                if not chunk:
+                    break
+                payload.extend(chunk)
+            after = os.fstat(descriptor)
+            if (
+                len(payload) > _MAX_JSON_BYTES
+                or (info.st_dev, info.st_ino, info.st_size)
+                != (after.st_dev, after.st_ino, after.st_size)
+            ):
+                raise _integrity_error()
+            value = json.loads(payload.decode("utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
             raise _integrity_error() from None
+        finally:
+            os.close(descriptor)
         if not isinstance(value, dict):
             raise _integrity_error()
         return value
@@ -472,11 +505,13 @@ class PromotionStore:
     @contextmanager
     def claim(self, path: Path) -> Iterator[None]:
         try:
-            descriptor = os.open(
-                path,
-                os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
-                0o600,
-            )
+            with self.anchor.parent(path) as (parent_fd, leaf):
+                descriptor = os.open(
+                    leaf,
+                    os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=parent_fd,
+                )
         except OSError:
             raise _integrity_error() from None
         try:
@@ -506,23 +541,41 @@ class PromotionStore:
             os.close(descriptor)
 
 
-def _ensure_dir(path: Path) -> None:
-    path.mkdir(mode=0o700, parents=False, exist_ok=True)
-    _require_dir(path)
-    os.chmod(path, 0o700)
-
-
-def _require_dir(path: Path) -> None:
+def _ensure_dir(path: Path, anchor: ProjectAnchor) -> None:
     try:
-        info = path.lstat()
+        with anchor.directory(anchor.relative(path), create=True):
+            pass
     except OSError:
         raise _integrity_error() from None
-    if (
-        not stat.S_ISDIR(info.st_mode)
-        or info.st_uid != os.getuid()
-        or stat.S_IMODE(info.st_mode) & 0o077
-    ):
-        raise _integrity_error()
+
+
+def _require_dir(path: Path, anchor: ProjectAnchor) -> None:
+    try:
+        with anchor.directory(anchor.relative(path)):
+            pass
+    except OSError:
+        raise _integrity_error() from None
+
+
+def _path_exists(path: Path, anchor: ProjectAnchor) -> bool:
+    try:
+        with anchor.parent(path) as (parent_fd, leaf):
+            os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        raise _integrity_error() from None
+
+
+def _json_names(path: Path, anchor: ProjectAnchor) -> tuple[str, ...]:
+    try:
+        with anchor.directory(anchor.relative(path)) as descriptor:
+            return tuple(
+                sorted(name for name in os.listdir(descriptor) if name.endswith(".json"))
+            )
+    except OSError:
+        raise _integrity_error() from None
 
 
 def _integrity_error() -> PromotionError:

@@ -61,8 +61,20 @@ class ProjectMediaStore:
     @classmethod
     def initialize(cls, project_root: Path) -> ProjectMediaStore:
         store = cls(project_root)
-        _ensure_private_directory(store.root)
-        store._anchor = ProjectAnchor(store.root)
+        try:
+            store._anchor = ProjectAnchor.for_project(store.project_root, create=True)
+        except OSError:
+            try:
+                entry = store.root.lstat()
+            except OSError:
+                entry = None
+            if entry is not None and stat.S_ISDIR(entry.st_mode):
+                _require_private_mode(store.root, entry)
+            raise MediaImportError(
+                "unsafe_storage_path",
+                "Project media storage contains an unsafe path.",
+                retryable=False,
+            ) from None
         for path in (
             store.media_root,
             store.blobs_base,
@@ -76,15 +88,20 @@ class ProjectMediaStore:
             store.waveforms_root,
             store.tmp_root,
         ):
-            _ensure_private_directory(path)
+            _ensure_private_directory_anchored(path, store._anchor)
         store._ensure_storage_ignore()
         return store
 
     @classmethod
     def open(cls, project_root: Path) -> ProjectMediaStore:
         store = cls(project_root)
-        _require_private_directory(store.root)
-        store._anchor = ProjectAnchor(store.root)
+        try:
+            store._anchor = ProjectAnchor.for_project(store.project_root)
+        except OSError:
+            raise MediaImportError(
+                "project_not_initialized",
+                "Initialize the ChordAtlas media project before opening it.",
+            ) from None
         for path in (
             store.media_root,
             store.blobs_base,
@@ -98,7 +115,7 @@ class ProjectMediaStore:
             store.waveforms_root,
             store.tmp_root,
         ):
-            _require_private_directory(path)
+            _require_private_directory_anchored(path, store._anchor)
         store._ensure_storage_ignore()
         return store
 
@@ -423,13 +440,16 @@ class ProjectMediaStore:
     def list_public_sources(self) -> list[dict[str, Any]]:
         self._require_anchor()
         values = []
-        for path in sorted(self.sources_root.glob("src_*.json")):
-            if path.is_symlink() or not path.is_file():
-                raise MediaImportError(
-                    "storage_integrity",
-                    "Project media records failed an integrity check.",
-                    retryable=False,
-                )
+        try:
+            anchor = self._required_anchor()
+            with anchor.directory(anchor.relative(self.sources_root)) as descriptor:
+                names = tuple(sorted(os.listdir(descriptor)))
+        except OSError:
+            raise _integrity_error() from None
+        for name in names:
+            if not name.startswith("src_") or not name.endswith(".json"):
+                raise _integrity_error()
+            path = self.sources_root / name
             try:
                 source = SourceReference.from_record_mapping(self._read_json(path))
             except MediaImportError:
@@ -521,7 +541,7 @@ class ProjectMediaStore:
         asset = self.asset_for_source(source_id)
         bucket_frames = waveform_bucket_frames(asset.duration_frames)
         path = self._waveform_path(asset.sha256, bucket_frames=bucket_frames)
-        if not path.exists():
+        if not self._path_exists(path):
             opened_asset, handle = self.open_audio_for_source(
                 source_id,
                 expected_asset_id=asset.id,
@@ -634,7 +654,7 @@ class ProjectMediaStore:
     def _ensure_storage_ignore(self) -> None:
         path = self.root / ".gitignore"
         expected = "*\n!.gitignore\n"
-        if path.exists():
+        if self._path_exists(path):
             if self._read_text(path) != expected:
                 raise _integrity_error()
             return
@@ -696,10 +716,8 @@ class ProjectMediaStore:
         blob_path: Path,
         digest: str,
     ) -> MediaAsset | None:
-        if not manifest_path.exists():
+        if not self._path_exists(manifest_path):
             return None
-        if manifest_path.is_symlink() or not manifest_path.is_file():
-            raise _integrity_error()
         try:
             asset = MediaAsset.from_record_mapping(self._read_json(manifest_path))
         except MediaImportError:
@@ -871,8 +889,8 @@ class ProjectMediaStore:
 
     def _publish_waveform(self, path: Path, waveform: Waveform) -> None:
         value = waveform.to_mapping()
-        if path.exists():
-            if path.is_symlink() or self._read_json(path) != value:
+        if self._path_exists(path):
+            if self._read_json(path) != value:
                 raise _integrity_error()
             return
         self._publish_json_exclusive(
@@ -986,6 +1004,16 @@ class ProjectMediaStore:
             raise _integrity_error()
         return self._anchor
 
+    def _path_exists(self, path: Path) -> bool:
+        try:
+            with self._required_anchor().parent(path) as (parent_fd, leaf):
+                os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+            return True
+        except FileNotFoundError:
+            return False
+        except OSError:
+            raise _integrity_error() from None
+
     def _require_anchor(self) -> None:
         try:
             anchor = self._required_anchor()
@@ -1077,6 +1105,18 @@ def _ensure_private_directory(path: Path) -> None:
     _require_private_mode(path, entry)
 
 
+def _ensure_private_directory_anchored(path: Path, anchor: ProjectAnchor) -> None:
+    try:
+        with anchor.directory(anchor.relative(path), create=True):
+            pass
+    except OSError:
+        raise MediaImportError(
+            "unsafe_storage_path",
+            "Project media storage contains an unsafe path.",
+            retryable=False,
+        ) from None
+
+
 def _require_private_directory(path: Path) -> None:
     try:
         entry = path.lstat()
@@ -1092,6 +1132,18 @@ def _require_private_directory(path: Path) -> None:
             retryable=False,
         )
     _require_private_mode(path, entry)
+
+
+def _require_private_directory_anchored(path: Path, anchor: ProjectAnchor) -> None:
+    try:
+        with anchor.directory(anchor.relative(path)):
+            pass
+    except OSError:
+        raise MediaImportError(
+            "unsafe_storage_path",
+            "Project media storage contains an unsafe path.",
+            retryable=False,
+        ) from None
 
 
 def _require_private_mode(path: Path, entry: os.stat_result) -> None:

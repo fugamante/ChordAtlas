@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
+import chordatlas.media.store as media_store_module
 
 from chordatlas.media import (
     FrameRange,
@@ -496,6 +497,37 @@ def test_project_storage_rejects_permissive_existing_root(tmp_path: Path) -> Non
         ProjectMediaStore.initialize(tmp_path)
 
     assert unsafe.value.code == "unsafe_storage_permissions"
+
+
+def test_initialize_rejects_intermediate_project_ancestor_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = tmp_path / "selected"
+    project = container / "project"
+    project.mkdir(parents=True)
+    displaced = tmp_path / "selected-original"
+    original = media_store_module._ensure_private_directory_anchored
+    replaced = False
+
+    def replace_then_create(path: Path, anchor) -> None:
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            container.rename(displaced)
+            project.mkdir(parents=True)
+        original(path, anchor)
+
+    monkeypatch.setattr(
+        media_store_module,
+        "_ensure_private_directory_anchored",
+        replace_then_create,
+    )
+    with pytest.raises(MediaImportError) as rejected:
+        ProjectMediaStore.initialize(project)
+
+    assert rejected.value.code == "unsafe_storage_path"
+    assert not (project / ".chordatlas").exists()
 
 
 def test_project_storage_local_ignore_hides_media_from_git(tmp_path: Path) -> None:

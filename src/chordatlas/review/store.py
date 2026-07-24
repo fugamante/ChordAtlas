@@ -50,9 +50,8 @@ class ReviewStore:
     def __init__(self, project_root: Path) -> None:
         self.project_root = project_root.resolve(strict=True)
         storage_root = self.project_root / ".chordatlas"
-        _require_dir(storage_root)
         try:
-            self.anchor = ProjectAnchor(storage_root)
+            self.anchor = ProjectAnchor.for_project(self.project_root)
         except OSError:
             raise _integrity_error() from None
         self.root = storage_root / "review"
@@ -68,7 +67,6 @@ class ReviewStore:
     @classmethod
     def initialize(cls, project_root: Path) -> ReviewStore:
         store = cls(project_root)
-        _require_dir(store.project_root / ".chordatlas")
         for path in (
             store.root,
             store.sessions,
@@ -109,7 +107,7 @@ class ReviewStore:
         session_id = f"review_{hashlib.sha256(f'{key_hash}:{request_fingerprint}'.encode()).hexdigest()[:32]}"
         with self._claim(self.locks / "project.lock"):
             key_path = self.create_keys / f"{key_hash}.json"
-            if key_path.exists():
+            if _path_exists(key_path, self.anchor):
                 key_record = self._read_json(key_path)
                 if (
                     set(key_record)
@@ -143,15 +141,13 @@ class ReviewStore:
                 }
                 self._publish_immutable(key_path, key_record)
             session_dir = self.sessions / session_id
-            if not session_dir.exists():
-                count = 0
-                for path in self.sessions.iterdir():
-                    count += 1
-                    if count >= _MAX_SESSIONS:
-                        raise ReviewError(
-                            "review_limit",
-                            "This project reached its private review-session limit.",
-                        )
+            if not _path_exists(session_dir, self.anchor) and len(
+                _entry_names(self.sessions, self.anchor)
+            ) >= _MAX_SESSIONS:
+                raise ReviewError(
+                    "review_limit",
+                    "This project reached its private review-session limit.",
+                )
             revision = ReviewRevision.create(
                 session_id=session_id,
                 parent_revision_id=None,
@@ -904,13 +900,27 @@ class ReviewStore:
                 or entry.st_size > _MAX_JSON_BYTES
             ):
                 raise _integrity_error()
-            with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
-                descriptor = -1
-                value = json.load(
-                    handle,
-                    object_pairs_hook=_reject_duplicate_keys,
-                    parse_constant=_reject_constant,
+            payload = bytearray()
+            while len(payload) <= _MAX_JSON_BYTES:
+                chunk = os.read(
+                    descriptor,
+                    min(64 * 1024, _MAX_JSON_BYTES + 1 - len(payload)),
                 )
+                if not chunk:
+                    break
+                payload.extend(chunk)
+            after = os.fstat(descriptor)
+            if (
+                len(payload) > _MAX_JSON_BYTES
+                or (entry.st_dev, entry.st_ino, entry.st_size)
+                != (after.st_dev, after.st_ino, after.st_size)
+            ):
+                raise _integrity_error()
+            value = json.loads(
+                payload.decode("utf-8"),
+                object_pairs_hook=_reject_duplicate_keys,
+                parse_constant=_reject_constant,
+            )
         except (OSError, UnicodeError, ValueError):
             raise _integrity_error() from None
         finally:
@@ -1095,18 +1105,15 @@ def _require_dir_anchored(path: Path, anchor: ProjectAnchor) -> None:
         raise _integrity_error() from None
 
 
-def _require_dir(path: Path) -> None:
+def _path_exists(path: Path, anchor: ProjectAnchor) -> bool:
     try:
-        entry = path.lstat()
+        with anchor.parent(path) as (parent_fd, leaf):
+            os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        return True
     except FileNotFoundError:
+        return False
+    except OSError:
         raise _integrity_error() from None
-    if (
-        stat.S_ISLNK(entry.st_mode)
-        or not stat.S_ISDIR(entry.st_mode)
-        or entry.st_uid != os.getuid()
-        or stat.S_IMODE(entry.st_mode) != 0o700
-    ):
-        raise _integrity_error()
 
 
 def _entry_names(path: Path, anchor: ProjectAnchor) -> tuple[str, ...]:

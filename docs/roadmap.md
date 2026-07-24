@@ -377,23 +377,21 @@ New work must answer these questions in order:
 Work that cannot clear this filter remains deferred even if it fits the
 long-term platform vision.
 
-## Immediate Next Pass - Stage 6 Practice Validation
+## Immediate Next Pass - Independent Final Contract Review
 
-Validate the accepted local-practice foundation without expanding the source
-or publication boundary:
+Review the complete Stage 0–6 integration after the project-containment and
+accessibility closure without expanding product scope:
 
-- Run the authorized musician setup protocol against full, repeated-section,
-  measure, and custom-range tasks.
-- Measure time and deliberate interactions to the correct range against manual
-  frame setup without calling either learning or musical quality.
-- Characterize browser/OS loop overshoot, delayed-play behavior after count-in,
-  and pitch acceptability across the bounded rates.
-- Run the authorized real-TLS interoperability protocol with operator-owned
-  generated media and retain only redacted aggregate evidence.
-- Harden only validated defects; keep practice state private and preserve the
-  exact integer-frame source of truth.
-- Preserve the Stage 5 direct-media policy; do not add hosted-provider behavior
-  as incidental practice work.
+- Reconfirm SongChart 1.0.0, schema, snapshot, CLI, and export compatibility.
+- Recheck descriptor-pinned project containment, immutable identities, integer
+  frame timing, authorization, SSRF, reset, and privacy boundaries.
+- Inspect the complete repository and pull-request range for public-hygiene or
+  unrelated-file drift.
+- Confirm documentation matches implemented Studio behavior and does not
+  overclaim browser timing, musical quality, or platform support.
+- Require the complete Python 3.11, release-check, installed-wheel, JavaScript,
+  privacy, and remote-check evidence before integration.
 
-Accounts, collaboration, cloud retention, advanced analysis, and provider
-adapters remain separately gated Stage 6 or later work.
+Feature expansion, musician efficacy claims, hosted-platform adapters,
+accounts, collaboration, cloud retention, and advanced analysis remain
+separately gated after the accepted integration is reviewed.

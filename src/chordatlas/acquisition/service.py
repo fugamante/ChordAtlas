@@ -224,13 +224,7 @@ class AcquisitionService:
                 job.thread.join(20)
 
     def _existing_idempotency(self, key: str, fingerprint: str) -> str | None:
-        # Claim with a sentinel is unsafe, so inspect the private deterministic
-        # record through the store's idempotent operation only after creation.
-        digest = hashlib.sha256(key.encode()).hexdigest()
-        path = self.store.idempotency_root / f"{digest}.json"
-        if not path.exists():
-            return None
-        return self.store.claim_idempotency(key, fingerprint, "acq_" + ("0" * 32))
+        return self.store.lookup_idempotency(key, fingerprint)
 
     def _supervise(self, job: _Job, source: DirectHttpsSource) -> None:
         stage_path: Path | None = None
@@ -330,13 +324,25 @@ class AcquisitionService:
                     ),
                 )
         finally:
+            close_error: OSError | None = None
             if stage_handle is not None:
-                stage_handle.close()
+                try:
+                    stage_handle.close()
+                except OSError as error:
+                    close_error = error
             if stage_path is not None:
                 try:
                     self.media.discard_private_stage(stage_path)
                 except MediaImportError:
                     pass
+            if close_error is not None and not self._complete_published(job):
+                self._fail(
+                    job,
+                    AcquisitionError(
+                        "acquisition_cleanup",
+                        "Acquisition staging failed to close safely. Retry it.",
+                    ),
+                )
 
     def _fail(self, job: _Job, error: AcquisitionError | MediaImportError) -> None:
         with self._lock:
