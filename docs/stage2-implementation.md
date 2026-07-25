@@ -83,6 +83,11 @@ state never transitions. `succeeded` is written only after the candidate
 timeline and run-output link have been validated and durably published.
 Failed, cancelled, and interrupted runs never claim a timeline.
 
+Complete journal replay, cache repair, transition publication, and the full
+success artifact commit are serialized across store instances by a
+descriptor-validated per-run advisory lock. `state.json` remains a replaceable
+cache and never outranks the immutable event sequence.
+
 Analysis runs outside HTTP request handling in a bounded local worker process.
 Stage 2 permits one active run per Studio project. Cancellation is cooperative
 first and terminates the worker after a bounded grace period; it is not reported

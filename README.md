@@ -360,9 +360,12 @@ See [docs/roadmap.md](docs/roadmap.md) for the product sequence and
 [docs/audio-transcription.md](docs/audio-transcription.md) for the implementation
 boundary.
 
-Near-term work:
+The Stage 1–6 foundations above are implemented. Near-term work is evidence and
+bounded capability expansion:
 
-- Deterministic promotion into the existing chart contract.
-- Guitar-aware tuning, capo, inversion, and voicing review.
 - An authorized musician study centered on musical outcomes and correction
   effort.
+- Promotion beyond confirmed constant 4/4, Standard tuning, and sounding chord
+  symbols.
+- Provider-specific source adapters only after separate authorization and
+  security design.

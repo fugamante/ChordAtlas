@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import math
 import os
+import shutil
+import stat
 import struct
 import threading
 import time
@@ -13,6 +16,7 @@ from pathlib import Path
 import pytest
 
 import chordatlas.analysis.baseline as baseline
+import chordatlas.analysis.store as analysis_store
 from chordatlas.analysis import (
     AnalysisConfig,
     AnalysisError,
@@ -961,6 +965,272 @@ def test_state_replay_detects_tampering_before_valid_tail(tmp_path: Path) -> Non
         store.load_state(run.id)
 
     assert rejected.value.code == "analysis_storage_integrity"
+
+
+@pytest.mark.parametrize("terminal_status", ("failed", "succeeded"))
+def test_state_replay_serializes_cross_instance_terminal_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_status: str,
+) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    reader = AnalysisStore.initialize(tmp_path)
+    writer = AnalysisStore.initialize(tmp_path)
+    spec = AnalysisSpec.create(
+        asset_id="sha256:" + ("a" * 64),
+        timebase=Timebase(8_000, 8_000),
+        analyzed_range=FrameRange(0, 8_000),
+    )
+    run = writer.create_run(spec, source_id="src_" + ("a" * 32))
+    writer.transition(run.id, "running")
+    timeline = ChordCandidateTimeline.create(
+        spec_id=spec.id,
+        timebase=spec.timebase,
+        analyzed_range=spec.analyzed_range,
+        result_kind="no_candidates",
+        beats=(),
+        tempo_hypotheses=(),
+        key_hypotheses=(),
+        segments=(),
+        engine=spec.config.engine,
+    )
+    snapshot_taken = threading.Event()
+    release_reader = threading.Event()
+    writer_waiting = threading.Event()
+    original_names = analysis_store._entry_names
+    original_flock = analysis_store.fcntl.flock
+
+    def pause_after_snapshot(path: Path, anchor) -> tuple[str, ...]:
+        names = original_names(path, anchor)
+        if threading.current_thread().name == "state-reader" and path.name == "events":
+            snapshot_taken.set()
+            assert release_reader.wait(5)
+        return names
+
+    def observe_writer_lock(descriptor: int, operation: int) -> None:
+        if (
+            threading.current_thread().name == "state-writer"
+            and operation == fcntl.LOCK_EX
+        ):
+            writer_waiting.set()
+        original_flock(descriptor, operation)
+
+    monkeypatch.setattr(analysis_store, "_entry_names", pause_after_snapshot)
+    monkeypatch.setattr(analysis_store.fcntl, "flock", observe_writer_lock)
+    observed: dict[str, object] = {}
+
+    def read_state() -> None:
+        observed["reader"] = reader.load_state(run.id)
+
+    def publish_terminal() -> None:
+        if terminal_status == "succeeded":
+            observed["writer"] = writer.publish_success(run.id, timeline)
+        else:
+            observed["writer"] = writer.transition(
+                run.id,
+                "failed",
+                failure_code="fixture_failure",
+                failure_message="Synthetic failure.",
+                retryable=True,
+            )
+
+    reader_thread = threading.Thread(target=read_state, name="state-reader")
+    writer_thread = threading.Thread(target=publish_terminal, name="state-writer")
+    reader_thread.start()
+    assert snapshot_taken.wait(5)
+    run_dir = writer.runs / run.id
+    with writer.anchor.directory(writer.anchor.relative(run_dir)) as probe:
+        with pytest.raises(BlockingIOError):
+            original_flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    writer_thread.start()
+    assert writer_waiting.wait(5)
+    assert not (writer.runs / run.id / "events" / "00000002.json").exists()
+
+    release_reader.set()
+    reader_thread.join(5)
+    writer_thread.join(5)
+
+    assert not reader_thread.is_alive()
+    assert not writer_thread.is_alive()
+    assert observed["reader"].revision == 1
+    assert observed["reader"].status == "running"
+    assert observed["writer"].revision == 2
+    assert observed["writer"].status == terminal_status
+    assert reader.load_state(run.id) == observed["writer"]
+    cache = json.loads((writer.runs / run.id / "state.json").read_text(encoding="utf-8"))
+    assert (cache["revision"], cache["status"]) == (2, terminal_status)
+    assert stat.S_IMODE(run_dir.stat().st_mode) == 0o700
+
+
+def test_success_publication_is_one_cross_instance_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    publisher = AnalysisStore.initialize(tmp_path)
+    contender = AnalysisStore.initialize(tmp_path)
+    spec = AnalysisSpec.create(
+        asset_id="sha256:" + ("a" * 64),
+        timebase=Timebase(8_000, 8_000),
+        analyzed_range=FrameRange(0, 8_000),
+    )
+    run = publisher.create_run(spec, source_id="src_" + ("a" * 32))
+    publisher.transition(run.id, "running")
+    timeline = ChordCandidateTimeline.create(
+        spec_id=spec.id,
+        timebase=spec.timebase,
+        analyzed_range=spec.analyzed_range,
+        result_kind="no_candidates",
+        beats=(),
+        tempo_hypotheses=(),
+        key_hypotheses=(),
+        segments=(),
+        engine=spec.config.engine,
+    )
+    output_pending = threading.Event()
+    release_publisher = threading.Event()
+    contender_waiting = threading.Event()
+    original_publish = publisher._publish_immutable
+    original_flock = analysis_store.fcntl.flock
+
+    def pause_before_output(path: Path, value: dict) -> None:
+        if path.name == "output.json":
+            output_pending.set()
+            assert release_publisher.wait(5)
+        original_publish(path, value)
+
+    def observe_contender(descriptor: int, operation: int) -> None:
+        if (
+            threading.current_thread().name == "failure-contender"
+            and operation == fcntl.LOCK_EX
+        ):
+            contender_waiting.set()
+        original_flock(descriptor, operation)
+
+    monkeypatch.setattr(publisher, "_publish_immutable", pause_before_output)
+    monkeypatch.setattr(analysis_store.fcntl, "flock", observe_contender)
+    observed: dict[str, object] = {}
+
+    def publish() -> None:
+        observed["published"] = publisher.publish_success(run.id, timeline)
+
+    def fail() -> None:
+        try:
+            contender.transition(
+                run.id,
+                "failed",
+                failure_code="fixture_failure",
+                failure_message="Synthetic failure.",
+                retryable=True,
+            )
+        except AnalysisError as error:
+            observed["contender_error"] = error
+
+    publisher_thread = threading.Thread(target=publish, name="success-publisher")
+    contender_thread = threading.Thread(target=fail, name="failure-contender")
+    publisher_thread.start()
+    assert output_pending.wait(5)
+    contender_thread.start()
+    assert contender_waiting.wait(5)
+    assert not (publisher.runs / run.id / "output.json").exists()
+    assert not (publisher.runs / run.id / "events" / "00000002.json").exists()
+
+    release_publisher.set()
+    publisher_thread.join(5)
+    contender_thread.join(5)
+
+    assert not publisher_thread.is_alive()
+    assert not contender_thread.is_alive()
+    assert observed["published"].status == "succeeded"
+    assert observed["contender_error"].code == "invalid_run_transition"
+    assert publisher.load_state(run.id).status == "succeeded"
+    assert publisher.timeline_for_run(run.id) == timeline
+
+
+def test_replaced_run_directory_fails_closed_without_cache_rewind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    reader = AnalysisStore.initialize(tmp_path)
+    writer = AnalysisStore.initialize(tmp_path)
+    spec = AnalysisSpec.create(
+        asset_id="sha256:" + ("a" * 64),
+        timebase=Timebase(8_000, 8_000),
+        analyzed_range=FrameRange(0, 8_000),
+    )
+    run = writer.create_run(spec, source_id="src_" + ("a" * 32))
+    writer.transition(run.id, "running")
+    replayed = threading.Event()
+    release_reader = threading.Event()
+    original_names = analysis_store._entry_names
+
+    def pause_after_replay(path: Path, anchor) -> tuple[str, ...]:
+        names = original_names(path, anchor)
+        if threading.current_thread().name == "replaced-lock-reader" and path.name == "events":
+            replayed.set()
+            assert release_reader.wait(5)
+        return names
+
+    monkeypatch.setattr(analysis_store, "_entry_names", pause_after_replay)
+    observed: dict[str, object] = {}
+
+    def read_state() -> None:
+        try:
+            reader.load_state(run.id)
+        except AnalysisError as error:
+            observed["reader_error"] = error
+
+    reader_thread = threading.Thread(target=read_state, name="replaced-lock-reader")
+    reader_thread.start()
+    assert replayed.wait(5)
+    run_dir = writer.runs / run.id
+    displaced = writer.tmp / "displaced-run"
+    old_inode = run_dir.stat().st_ino
+    run_dir.rename(displaced)
+    shutil.copytree(displaced, run_dir)
+    terminal = writer.transition(
+        run.id,
+        "failed",
+        failure_code="fixture_failure",
+        failure_message="Synthetic failure.",
+        retryable=True,
+    )
+    assert run_dir.stat().st_ino != old_inode
+
+    release_reader.set()
+    reader_thread.join(5)
+
+    assert not reader_thread.is_alive()
+    assert observed["reader_error"].code == "analysis_storage_integrity"
+    assert reader.load_state(run.id) == terminal
+    cache = json.loads((writer.runs / run.id / "state.json").read_text(encoding="utf-8"))
+    assert (cache["revision"], cache["status"]) == (2, "failed")
+
+
+def test_missing_state_cache_remains_visible_and_recovers(tmp_path: Path) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AnalysisStore.initialize(tmp_path)
+    spec = AnalysisSpec.create(
+        asset_id="sha256:" + ("a" * 64),
+        timebase=Timebase(8_000, 8_000),
+        analyzed_range=FrameRange(0, 8_000),
+    )
+    run = store.create_run(spec, source_id="src_" + ("a" * 32))
+    cache = store.runs / run.id / "state.json"
+    cache.unlink()
+
+    listed = store.list_runs()
+
+    assert [item["run_id"] for item in listed] == [run.id]
+    assert listed[0]["status"] == "queued"
+    assert cache.exists()
+    cache.unlink()
+
+    store.recover_interrupted()
+
+    assert store.load_state(run.id).status == "failed"
+    assert cache.exists()
 
 
 def test_same_revision_cache_divergence_repairs_from_journal(tmp_path: Path) -> None:

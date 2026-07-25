@@ -536,6 +536,45 @@ def test_idempotency_survives_service_restart(tmp_path: Path) -> None:
     assert second_transport.calls == []
 
 
+def test_active_idempotent_replay_returns_existing_attempt(tmp_path: Path) -> None:
+    transport = BlockingTransport()
+    service = AcquisitionService(tmp_path, transport=transport)
+    args = {
+        "url": "https://audio.example/take",
+        "display_name": "take.wav",
+        "authorization_confirmed": True,
+        "idempotency_key": "active-request",
+    }
+    run_id = service.start(**args)
+
+    assert service.start(**args) == run_id
+    with pytest.raises(AcquisitionError) as conflict:
+        service.start(
+            **{
+                **args,
+                "url": "https://other.example/take",
+            }
+        )
+    with pytest.raises(AcquisitionError) as busy:
+        service.start(
+            **{
+                **args,
+                "idempotency_key": "distinct-request",
+            }
+        )
+
+    assert conflict.value.code == "idempotency_conflict"
+    assert busy.value.code == "acquisition_busy"
+    for _ in range(200):
+        if service.status(run_id)["status"] == "running":
+            break
+        threading.Event().wait(0.01)
+    assert service.status(run_id)["status"] == "running"
+    assert service.cancel(run_id)["status"] == "cancel_requested"
+    assert service.wait(run_id, 5)["status"] == "cancelled"
+    assert transport.calls == ["https://audio.example/take"]
+
+
 @pytest.mark.parametrize(
     "tamper",
     ("extra_key", "key_digest", "fingerprint", "unbound_run"),

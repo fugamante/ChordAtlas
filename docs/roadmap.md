@@ -48,7 +48,7 @@ over every result.
 8. **No lyric reproduction.** Audio analysis does not broaden the existing
    copyrighted-lyrics policy.
 
-## Stage 0 - Foundation (Current)
+## Stage 0 - Retained Chart Foundation
 
 The current CLI is supporting infrastructure, not the final product.
 
@@ -63,24 +63,26 @@ Stage 0 provides:
 - Recording-source comparison analytics.
 - Golden snapshots, schema checks, release checks, and tests.
 
-These capabilities remain useful as the reviewed publication boundary. The
-interactive transcription domain will promote an approved review revision into
-the existing `SongChart`; it will not put raw detector state into that schema.
+These capabilities remain the reviewed publication boundary. The implemented
+Stage 4 promotion path converts an approved review revision into the existing
+`SongChart`; raw detector state remains outside that schema.
 
-Stage 0 remains in maintenance mode while the active vertical slice is built.
-Correctness, compatibility, and release reliability continue to be maintained,
-but unrelated expansion should not displace the active milestone.
+Stage 0 remains in maintenance mode while the implemented audio transcription
+foundation is hardened and evaluated. Correctness, compatibility, and release
+reliability continue to be maintained, but unrelated expansion should not
+displace that work.
 
-## First Interactive Release - Stages 1 Through 4
+## First Interactive Release Foundation - Stages 1 Through 4
 
-Stages 1 through 4 form one active vertical-slice milestone. Each stage has an
-independent contract and exit criteria, but the first interactive release is
-not complete until one authorized local file passes through all four and
-reaches an approved export.
+Stages 1 through 4 now form one implemented local vertical-slice foundation.
+Each stage has an independent contract and exit criteria, and one authorized
+local PCM16 WAV can pass through all four to reach an approved export. Product
+efficacy remains unproven until the authorized musician study measures musical
+quality and correction effort.
 
-### Objective
+### Implemented objective
 
-Prove one complete local-file workflow:
+The current foundation covers one complete local-file workflow:
 
 ```text
 import
@@ -166,7 +168,7 @@ Exit criteria:
   accepted or corrected and produces `ready_for_approval`, not an approved
   chart.
 
-## Stage 4 - Guitar-Aware Chart Generation
+## Stage 4 - Guitar-Aware Chart Generation (Implemented Local Foundation)
 
 Implemented foundation:
 

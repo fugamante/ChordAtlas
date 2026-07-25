@@ -75,25 +75,25 @@ class AcquisitionService:
                 "Idempotency key is invalid.",
                 retryable=False,
             )
+        url_fingerprint = hashlib.sha256(source.url.encode()).hexdigest()
+        fingerprint = idempotency_fingerprint(
+            url_fingerprint=url_fingerprint,
+            display_name=safe_name,
+            retry_of=retry_of,
+        )
         with self._lock:
             if self._closed:
                 raise AcquisitionError("acquisition_closed", "Acquisition service is stopping.")
+            if idempotency_key is not None:
+                existing = self._existing_idempotency(idempotency_key, fingerprint)
+                if existing is not None:
+                    return existing
             active = [job for job in self._jobs.values() if job.thread and job.thread.is_alive()]
             if active:
                 raise AcquisitionError(
                     "acquisition_busy",
                     "Another acquisition is active. Wait, cancel it, or retry later.",
                 )
-            url_fingerprint = hashlib.sha256(source.url.encode()).hexdigest()
-            fingerprint = idempotency_fingerprint(
-                url_fingerprint=url_fingerprint,
-                display_name=safe_name,
-                retry_of=retry_of,
-            )
-            if idempotency_key is not None:
-                existing = self._existing_idempotency(idempotency_key, fingerprint)
-                if existing is not None:
-                    return existing
             request, claim = self.store.create_claimed_request(
                 normalized_url=source.url,
                 display_name=safe_name,

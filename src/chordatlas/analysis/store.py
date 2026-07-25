@@ -5,6 +5,8 @@ import json
 import os
 import stat
 import threading
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -132,10 +134,17 @@ class AnalysisStore:
         run_dir = self.runs / run.id
         _ensure_dir(run_dir, self.anchor)
         _ensure_dir(run_dir / "events", self.anchor)
-        self._publish_immutable(run_dir / "request.json", run.to_record_mapping())
-        state = RunState(run.id, 0, "queued", _utc_now())
-        self._publish_immutable(run_dir / "events" / "00000000.json", state.to_record_mapping())
-        self._replace_state(run_dir / "state.json", state)
+        with self._state_guard(run_dir) as lock_descriptor:
+            self._publish_immutable(run_dir / "request.json", run.to_record_mapping())
+            _verify_lock_dir(run_dir, lock_descriptor, self.anchor)
+            state = RunState(run.id, 0, "queued", _utc_now())
+            self._publish_immutable(
+                run_dir / "events" / "00000000.json",
+                state.to_record_mapping(),
+            )
+            _verify_lock_dir(run_dir, lock_descriptor, self.anchor)
+            self._replace_state(run_dir / "state.json", state)
+            _verify_lock_dir(run_dir, lock_descriptor, self.anchor)
 
     def load_run(self, run_id: str) -> AnalysisRun:
         _validate_run_id(run_id)
@@ -155,22 +164,36 @@ class AnalysisStore:
         _validate_run_id(run_id)
         with self._lock:
             run_dir = self.runs / run_id
+            with self._state_guard(run_dir) as lock_descriptor:
+                return self._load_state_locked(run_id, run_dir, lock_descriptor)
+
+    def _load_state_locked(
+        self,
+        run_id: str,
+        run_dir: Path,
+        lock_descriptor: int,
+    ) -> RunState:
+        try:
+            latest = self._replay_states(run_id, run_dir)
+            _verify_lock_dir(run_dir, lock_descriptor, self.anchor)
             try:
-                latest = self._replay_states(run_id, run_dir)
-                try:
-                    cached = state_from_mapping(
-                        self._read_json(run_dir / "state.json")
-                    )
-                except (AnalysisError, KeyError, TypeError, ValueError):
-                    self._replace_state(run_dir / "state.json", latest)
-                    return latest
-                if cached != latest:
-                    self._replace_state(run_dir / "state.json", latest)
+                cached = state_from_mapping(
+                    self._read_json(run_dir / "state.json")
+                )
+            except (AnalysisError, KeyError, TypeError, ValueError):
+                _verify_lock_dir(run_dir, lock_descriptor, self.anchor)
+                self._replace_state(run_dir / "state.json", latest)
+                _verify_lock_dir(run_dir, lock_descriptor, self.anchor)
                 return latest
-            except AnalysisError:
-                raise
-            except (KeyError, TypeError, ValueError):
-                raise _integrity_error() from None
+            if cached != latest:
+                _verify_lock_dir(run_dir, lock_descriptor, self.anchor)
+                self._replace_state(run_dir / "state.json", latest)
+            _verify_lock_dir(run_dir, lock_descriptor, self.anchor)
+            return latest
+        except AnalysisError:
+            raise
+        except (KeyError, TypeError, ValueError):
+            raise _integrity_error() from None
 
     def _replay_states(self, run_id: str, run_dir: Path) -> RunState:
         names = _entry_names(run_dir / "events", self.anchor)
@@ -238,33 +261,90 @@ class AnalysisStore:
         retryable: bool = False,
         timeline_id: str | None = None,
     ) -> RunState:
+        _validate_run_id(run_id)
         with self._lock:
-            current = self.load_state(run_id)
-            if status not in VALID_TRANSITIONS[current.status]:
-                raise AnalysisError(
-                    "invalid_run_transition",
-                    f"Run cannot transition from {current.status} to {status}.",
-                    retryable=False,
-                )
-            state = RunState(
-                run_id=run_id,
-                revision=current.revision + 1,
-                status=status,
-                updated_at=_utc_now(),
-                failure_code=failure_code,
-                failure_message=failure_message,
-                retryable=retryable,
-                timeline_id=timeline_id,
-            )
-            if state.status == "succeeded":
-                self._validate_success_publication(run_id, state)
             run_dir = self.runs / run_id
-            self._publish_immutable(
-                run_dir / "events" / f"{state.revision:08d}.json",
-                state.to_record_mapping(),
+            with self._state_guard(run_dir) as lock_descriptor:
+                current = self._load_state_locked(
+                    run_id,
+                    run_dir,
+                    lock_descriptor,
+                )
+                return self._transition_locked(
+                    run_dir,
+                    current,
+                    status,
+                    failure_code=failure_code,
+                    failure_message=failure_message,
+                    retryable=retryable,
+                    timeline_id=timeline_id,
+                    lock_descriptor=lock_descriptor,
+                )
+
+    def _transition_locked(
+        self,
+        run_dir: Path,
+        current: RunState,
+        status: str,
+        *,
+        failure_code: str | None,
+        failure_message: str | None,
+        retryable: bool,
+        timeline_id: str | None,
+        lock_descriptor: int,
+    ) -> RunState:
+        if status not in VALID_TRANSITIONS[current.status]:
+            raise AnalysisError(
+                "invalid_run_transition",
+                f"Run cannot transition from {current.status} to {status}.",
+                retryable=False,
             )
-            self._replace_state(run_dir / "state.json", state)
-            return state
+        state = RunState(
+            run_id=current.run_id,
+            revision=current.revision + 1,
+            status=status,
+            updated_at=_utc_now(),
+            failure_code=failure_code,
+            failure_message=failure_message,
+            retryable=retryable,
+            timeline_id=timeline_id,
+        )
+        if state.status == "succeeded":
+            self._validate_success_publication(current.run_id, state)
+        _verify_lock_dir(run_dir, lock_descriptor, self.anchor)
+        self._publish_immutable(
+            run_dir / "events" / f"{state.revision:08d}.json",
+            state.to_record_mapping(),
+        )
+        _verify_lock_dir(run_dir, lock_descriptor, self.anchor)
+        self._replace_state(run_dir / "state.json", state)
+        _verify_lock_dir(run_dir, lock_descriptor, self.anchor)
+        return state
+
+    @contextmanager
+    def _state_guard(self, run_dir: Path) -> Iterator[int]:
+        stack = ExitStack()
+        try:
+            relative = self.anchor.relative(run_dir)
+            descriptor = stack.enter_context(self.anchor.directory(relative))
+        except OSError:
+            stack.close()
+            raise _integrity_error() from None
+        locked = False
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                locked = True
+            except OSError:
+                raise _integrity_error() from None
+            _verify_lock_dir(run_dir, descriptor, self.anchor)
+            yield descriptor
+        finally:
+            try:
+                if locked:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                stack.close()
 
     def publish_success(
         self,
@@ -272,14 +352,7 @@ class AnalysisStore:
         timeline: ChordCandidateTimeline,
     ) -> RunState:
         run = self.load_run(run_id)
-        state = self.load_state(run_id)
         spec = self.load_spec(run.spec_id)
-        if state.status != "running":
-            raise AnalysisError(
-                "run_not_publishable",
-                "Only a running analysis can publish a result.",
-                retryable=False,
-            )
         if run.spec_id != timeline.spec_id:
             raise AnalysisError(
                 "invalid_engine_output",
@@ -296,11 +369,44 @@ class AnalysisStore:
                 "The analysis result provenance does not match its specification.",
                 retryable=False,
             )
-        timeline_path = self._digest_path(self.timelines, timeline.id, create=True)
-        self._publish_immutable(timeline_path, timeline.to_record_mapping())
-        output = {"timeline_id": timeline.id}
-        self._publish_immutable(self.runs / run_id / "output.json", output)
-        return self.transition(run_id, "succeeded", timeline_id=timeline.id)
+        with self._lock:
+            run_dir = self.runs / run_id
+            with self._state_guard(run_dir) as lock_descriptor:
+                state = self._load_state_locked(
+                    run_id,
+                    run_dir,
+                    lock_descriptor,
+                )
+                if state.status != "running":
+                    raise AnalysisError(
+                        "run_not_publishable",
+                        "Only a running analysis can publish a result.",
+                        retryable=False,
+                    )
+                timeline_path = self._digest_path(
+                    self.timelines,
+                    timeline.id,
+                    create=True,
+                )
+                self._publish_immutable(
+                    timeline_path,
+                    timeline.to_record_mapping(),
+                )
+                _verify_lock_dir(run_dir, lock_descriptor, self.anchor)
+                self._publish_immutable(
+                    run_dir / "output.json",
+                    {"timeline_id": timeline.id},
+                )
+                return self._transition_locked(
+                    run_dir,
+                    state,
+                    "succeeded",
+                    failure_code=None,
+                    failure_message=None,
+                    retryable=False,
+                    timeline_id=timeline.id,
+                    lock_descriptor=lock_descriptor,
+                )
 
     def timeline_for_run(self, run_id: str) -> ChordCandidateTimeline:
         state = self.load_state(run_id)
@@ -331,9 +437,7 @@ class AnalysisStore:
                 continue
             path = self.runs / name
             _require_dir(path, self.anchor)
-            if not _path_exists(
-                path / "request.json", self.anchor
-            ) or not _path_exists(path / "state.json", self.anchor):
+            if not _path_exists(path / "request.json", self.anchor):
                 continue
             run = self.load_run(path.name)
             if source_id is not None and run.source_id != source_id:
@@ -358,9 +462,7 @@ class AnalysisStore:
                     continue
                 path = self.runs / name
                 _require_dir(path, self.anchor)
-                if not _path_exists(
-                    path / "request.json", self.anchor
-                ) or not _path_exists(path / "state.json", self.anchor):
+                if not _path_exists(path / "request.json", self.anchor):
                     continue
                 state = self.load_state(path.name)
                 if state.status in {"queued", "running", "cancel_requested"}:
@@ -562,6 +664,22 @@ def _open_claim_file(path: Path, anchor: ProjectAnchor) -> int:
         os.close(descriptor)
         raise _integrity_error()
     return descriptor
+
+
+def _verify_lock_dir(path: Path, descriptor: int, anchor: ProjectAnchor) -> None:
+    try:
+        held = os.fstat(descriptor)
+        with anchor.directory(anchor.relative(path)) as named_descriptor:
+            named = os.fstat(named_descriptor)
+    except OSError:
+        raise _integrity_error() from None
+    if (
+        (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino)
+        or not stat.S_ISDIR(named.st_mode)
+        or named.st_uid != os.getuid()
+        or stat.S_IMODE(named.st_mode) != 0o700
+    ):
+        raise _integrity_error()
 
 
 def _ensure_dir(path: Path, anchor: ProjectAnchor) -> None:
