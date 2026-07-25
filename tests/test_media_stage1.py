@@ -127,6 +127,159 @@ def test_concurrent_stores_converge_on_one_deterministic_asset(tmp_path: Path) -
     assert len(list(first.sources_root.glob("src_*.json"))) == 2
 
 
+def test_source_record_is_bound_to_requested_path_identity(tmp_path: Path) -> None:
+    store = ProjectMediaStore.initialize(tmp_path)
+    first, _asset = import_wav(store, synthetic_wav(), name="first.wav")
+    second, _asset = import_wav(store, synthetic_wav(), name="second.wav")
+    first_path = store.sources_root / f"{first.id}.json"
+    second_path = store.sources_root / f"{second.id}.json"
+    first_path.write_bytes(second_path.read_bytes())
+
+    with pytest.raises(MediaImportError) as rejected:
+        store.source(first.id)
+
+    assert rejected.value.code == "storage_integrity"
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("source_schema_version", "2.0.0"),
+        ("unexpected", True),
+        ("display_name", 7),
+    ),
+)
+def test_source_record_requires_exact_schema_keys_and_types(
+    tmp_path: Path,
+    field: str,
+    replacement,
+) -> None:
+    store = ProjectMediaStore.initialize(tmp_path)
+    source, _asset = import_wav(store, synthetic_wav())
+    path = store.sources_root / f"{source.id}.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value[field] = replacement
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(MediaImportError) as rejected:
+        store.source(source.id)
+
+    assert rejected.value.code == "storage_integrity"
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("media_schema_version", "2.0.0"),
+        ("unexpected", True),
+        ("byte_length", True),
+        ("sample_rate", "8000"),
+        ("duration_frames", 2050.0),
+    ),
+)
+def test_media_manifest_requires_exact_schema_keys_and_types(
+    tmp_path: Path,
+    field: str,
+    replacement,
+) -> None:
+    store = ProjectMediaStore.initialize(tmp_path)
+    source, _asset = import_wav(store, synthetic_wav())
+    path = next(store.manifests_root.rglob("*.json"))
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value[field] = replacement
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(MediaImportError) as rejected:
+        store.asset_for_source(source.id)
+
+    assert rejected.value.code == "storage_integrity"
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("sample_rate", 9_000),
+        ("channels", 2),
+        ("duration_frames", 2049),
+    ),
+)
+def test_media_manifest_must_match_descriptor_derived_wav_metadata(
+    tmp_path: Path,
+    field: str,
+    replacement: int,
+) -> None:
+    store = ProjectMediaStore.initialize(tmp_path)
+    source, _asset = import_wav(store, synthetic_wav())
+    path = next(store.manifests_root.rglob("*.json"))
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value[field] = replacement
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(MediaImportError) as rejected:
+        store.asset_for_source(source.id)
+
+    assert rejected.value.code == "storage_integrity"
+
+
+@pytest.mark.parametrize(
+    ("path", "replacement"),
+    (
+        (("waveform_schema_version",), "2.0.0"),
+        (("unexpected",), True),
+        (("bucket_frames",), True),
+        (("timebase", "sample_rate"), "8000"),
+        (("buckets", 0, "start_frame"), 0.0),
+        (("buckets", 0, "min_q15"), False),
+    ),
+)
+def test_waveform_cache_requires_exact_schema_keys_and_integer_types(
+    tmp_path: Path,
+    path: tuple,
+    replacement,
+) -> None:
+    store = ProjectMediaStore.initialize(tmp_path)
+    source, _asset = import_wav(store, synthetic_wav())
+    store.waveform_for_source(source.id)
+    waveform_path = next(store.waveforms_root.rglob("*.json"))
+    value = json.loads(waveform_path.read_text(encoding="utf-8"))
+    target = value
+    for part in path[:-1]:
+        target = target[part]
+    target[path[-1]] = replacement
+    waveform_path.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(MediaImportError) as rejected:
+        store.waveform_for_source(source.id)
+
+    assert rejected.value.code == "storage_integrity"
+
+
+@pytest.mark.parametrize(
+    "constructor",
+    (
+        lambda: FrameRange(False, 1),
+        lambda: FrameRange(0, 1.5),
+        lambda: FrameRange(0, "1"),
+        lambda: Timebase(True, 1),
+        lambda: Timebase(8_000, 1.5),
+        lambda: Timebase(8_000, "1"),
+    ),
+)
+def test_frame_and_timebase_values_require_exact_integers(constructor) -> None:
+    with pytest.raises(TypeError):
+        constructor()
+
+
+@pytest.mark.parametrize("frame", (True, 1.5, "1"))
+def test_timebase_frame_inputs_require_exact_integers(frame) -> None:
+    timebase = Timebase(8_000, 100)
+
+    with pytest.raises(TypeError):
+        timebase.clamp_frame(frame)
+    with pytest.raises(TypeError):
+        timebase.frame_to_seconds(frame)
+
+
 def test_changed_bytes_under_same_name_create_new_asset(tmp_path: Path) -> None:
     store = ProjectMediaStore.initialize(tmp_path)
 
@@ -162,6 +315,38 @@ def test_verified_audio_handle_cannot_be_retargeted_after_validation(
     with pytest.raises(MediaImportError) as changed:
         store.open_audio_for_source(source.id, expected_asset_id=asset.id)
     assert changed.value.code == "storage_integrity"
+
+
+def test_manifest_metadata_check_rebinds_canonical_blob_after_inspection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = synthetic_wav()
+    store = ProjectMediaStore.initialize(tmp_path)
+    source, _asset = import_wav(store, original)
+    blob = store.audio_path_for_source(source.id)
+    displaced = blob.with_suffix(".inspected")
+    inspect = media_store_module.inspect_pcm16_wav_stream
+
+    def replace_after_inspection(handle, *, file_size: int):
+        info = inspect(handle, file_size=file_size)
+        blob.rename(displaced)
+        blob.write_bytes(b"X" * len(original))
+        os.chmod(blob, 0o600)
+        return info
+
+    monkeypatch.setattr(
+        media_store_module,
+        "inspect_pcm16_wav_stream",
+        replace_after_inspection,
+    )
+
+    with pytest.raises(MediaImportError) as rejected:
+        store.asset_for_source(source.id)
+
+    assert rejected.value.code == "storage_integrity"
+    assert displaced.read_bytes() == original
+    assert blob.read_bytes().startswith(b"X")
 
 
 @pytest.mark.parametrize("operation", ("open", "verify"))

@@ -9,6 +9,18 @@ from urllib.parse import urlsplit, urlunsplit
 
 _ACQUISITION_RE = re.compile(r"^acq_[0-9a-f]{32}$")
 _SOURCE_RE = re.compile(r"^src_[0-9a-f]{32}$")
+_ACQUISITION_SCHEMA_VERSION = "1.0.0-draft"
+_ACQUISITION_RECORD_KEYS = {
+    "acquisition_schema_version",
+    "id",
+    "source_id",
+    "display_name",
+    "url_fingerprint",
+    "authorization_basis",
+    "authorized_at",
+    "created_at",
+    "retry_of",
+}
 _HOSTED_MEDIA_HOSTS = (
     "youtube.com",
     "youtu.be",
@@ -124,6 +136,19 @@ class AcquisitionRequest:
     retry_of: str | None = None
 
     def __post_init__(self) -> None:
+        if not all(
+            type(value) is str
+            for value in (
+                self.id,
+                self.source_id,
+                self.display_name,
+                self.url_fingerprint,
+                self.authorization_basis,
+                self.authorized_at,
+                self.created_at,
+            )
+        ) or (self.retry_of is not None and type(self.retry_of) is not str):
+            raise TypeError("acquisition request fields have invalid types")
         if _ACQUISITION_RE.fullmatch(self.id) is None:
             raise ValueError("invalid acquisition id")
         if _SOURCE_RE.fullmatch(self.source_id) is None:
@@ -136,10 +161,12 @@ class AcquisitionRequest:
             raise ValueError("invalid authorization basis")
         if self.retry_of is not None and _ACQUISITION_RE.fullmatch(self.retry_of) is None:
             raise ValueError("invalid retry id")
+        if not self.authorized_at or not self.created_at:
+            raise ValueError("invalid acquisition timestamp")
 
     def to_record_mapping(self) -> dict[str, Any]:
         return {
-            "acquisition_schema_version": "1.0.0-draft",
+            "acquisition_schema_version": _ACQUISITION_SCHEMA_VERSION,
             "id": self.id,
             "source_id": self.source_id,
             "display_name": self.display_name,
@@ -152,15 +179,19 @@ class AcquisitionRequest:
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> AcquisitionRequest:
+        if type(value) is not dict or set(value) != _ACQUISITION_RECORD_KEYS:
+            raise ValueError("invalid acquisition request keys")
+        if value.get("acquisition_schema_version") != _ACQUISITION_SCHEMA_VERSION:
+            raise ValueError("invalid acquisition schema version")
         return cls(
-            id=str(value["id"]),
-            source_id=str(value["source_id"]),
-            display_name=str(value["display_name"]),
-            url_fingerprint=str(value["url_fingerprint"]),
-            authorization_basis=str(value["authorization_basis"]),
-            authorized_at=str(value["authorized_at"]),
-            created_at=str(value["created_at"]),
-            retry_of=None if value["retry_of"] is None else str(value["retry_of"]),
+            id=value["id"],
+            source_id=value["source_id"],
+            display_name=value["display_name"],
+            url_fingerprint=value["url_fingerprint"],
+            authorization_basis=value["authorization_basis"],
+            authorized_at=value["authorized_at"],
+            created_at=value["created_at"],
+            retry_of=value["retry_of"],
         )
 
 

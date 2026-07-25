@@ -461,6 +461,8 @@ class ProjectMediaStore:
                 raise
             except (KeyError, TypeError, ValueError):
                 raise _integrity_error() from None
+            if source.id != Path(name).stem:
+                raise _integrity_error()
             asset = self.asset_for_source(source.id)
             values.append(
                 {
@@ -475,11 +477,14 @@ class ProjectMediaStore:
         _validate_source_id(source_id)
         path = self.sources_root / f"{source_id}.json"
         try:
-            return SourceReference.from_record_mapping(self._read_json(path))
+            source = SourceReference.from_record_mapping(self._read_json(path))
         except MediaImportError:
             raise
         except (KeyError, TypeError, ValueError):
             raise _integrity_error() from None
+        if source.id != source_id:
+            raise _integrity_error()
+        return source
 
     def asset_for_source(self, source_id: str) -> MediaAsset:
         self._require_anchor()
@@ -564,24 +569,55 @@ class ProjectMediaStore:
             self._publish_waveform(path, waveform)
         try:
             value = self._read_json(path)
+            if (
+                set(value)
+                != {
+                    "waveform_schema_version",
+                    "algorithm",
+                    "bucket_frames",
+                    "timebase",
+                    "buckets",
+                }
+                or value.get("waveform_schema_version") != "1.0.0-draft"
+                or type(value.get("algorithm")) is not str
+                or type(value.get("bucket_frames")) is not int
+                or type(value.get("timebase")) is not dict
+                or type(value.get("buckets")) is not list
+            ):
+                raise ValueError("invalid waveform record")
             timebase_value = value["timebase"]
+            if (
+                set(timebase_value) != {"unit", "sample_rate", "duration_frames"}
+                or timebase_value.get("unit") != "sample_frame"
+                or type(timebase_value.get("sample_rate")) is not int
+                or type(timebase_value.get("duration_frames")) is not int
+            ):
+                raise ValueError("invalid waveform timebase")
+            for item in value["buckets"]:
+                if (
+                    type(item) is not dict
+                    or set(item)
+                    != {"start_frame", "end_frame", "min_q15", "max_q15"}
+                    or any(type(item.get(key)) is not int for key in item)
+                ):
+                    raise ValueError("invalid waveform bucket")
             buckets = tuple(
                 WaveformBucket(
-                    start_frame=int(item["start_frame"]),
-                    end_frame=int(item["end_frame"]),
-                    min_q15=int(item["min_q15"]),
-                    max_q15=int(item["max_q15"]),
+                    start_frame=item["start_frame"],
+                    end_frame=item["end_frame"],
+                    min_q15=item["min_q15"],
+                    max_q15=item["max_q15"],
                 )
                 for item in value["buckets"]
             )
             from chordatlas.media.models import Timebase
 
             waveform = Waveform(
-                algorithm=str(value["algorithm"]),
-                bucket_frames=int(value["bucket_frames"]),
+                algorithm=value["algorithm"],
+                bucket_frames=value["bucket_frames"],
                 timebase=Timebase(
-                    sample_rate=int(timebase_value["sample_rate"]),
-                    duration_frames=int(timebase_value["duration_frames"]),
+                    sample_rate=timebase_value["sample_rate"],
+                    duration_frames=timebase_value["duration_frames"],
                 ),
                 buckets=buckets,
             )
@@ -739,9 +775,48 @@ class ProjectMediaStore:
             raise
         except (KeyError, TypeError, ValueError):
             raise _integrity_error() from None
-        if asset.sha256 != digest:
+        if asset.id != f"sha256:{digest}" or asset.sha256 != digest:
             raise _integrity_error()
-        self._verify_blob(blob_path, digest, asset.byte_length)
+        anchor = self._required_anchor()
+        descriptor = -1
+        try:
+            with anchor.parent(blob_path) as (parent_fd, leaf):
+                descriptor = os.open(
+                    leaf,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_fd,
+                )
+                named = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+                self._verify_blob_descriptor(
+                    descriptor,
+                    named,
+                    digest,
+                    asset.byte_length,
+                )
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                    info = inspect_pcm16_wav_stream(
+                        handle,
+                        file_size=asset.byte_length,
+                    )
+                self._verify_info(asset, info)
+                rebound = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                self._verify_blob_descriptor(
+                    descriptor,
+                    rebound,
+                    digest,
+                    asset.byte_length,
+                )
+        except MediaImportError as error:
+            if error.code == "storage_integrity":
+                raise
+            raise _integrity_error() from None
+        except OSError:
+            raise _integrity_error() from None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
         return asset
 
     def _publish_blob(

@@ -27,7 +27,7 @@ from chordatlas.analysis import (
     analyze_pcm16_wav,
     evaluate_timeline,
 )
-from chordatlas.analysis.models import content_digest
+from chordatlas.analysis.models import content_digest, timeline_from_mapping
 from chordatlas.media import FrameRange, ProjectMediaStore, Timebase
 
 
@@ -93,6 +93,11 @@ def wait_terminal(service: AnalysisService, run_id: str, timeout: float = 15) ->
             return status
         time.sleep(0.05)
     raise AssertionError("analysis did not reach a terminal state")
+
+
+def overwrite_private_json(path: Path, value: object) -> None:
+    path.write_text(json.dumps(value), encoding="utf-8")
+    os.chmod(path, 0o600)
 
 
 def test_spec_digest_is_canonical_and_changes_with_reproducibility_inputs() -> None:
@@ -509,6 +514,260 @@ def test_store_preserves_attempts_and_publishes_success_last(tmp_path: Path) -> 
     assert store.load_state(first.id).status == "failed"
     assert store.load_state(second.id).status == "queued"
     assert not (store.runs / first.id / "output.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("record", "mutation"),
+    [
+        ("run", lambda value: value.update({"analysis_run_schema_version": "9"})),
+        ("run", lambda value: value.update({"unexpected": True})),
+        ("run", lambda value: value.update({"created_at": 1})),
+        ("state", lambda value: value.update({"run_state_schema_version": "9"})),
+        ("state", lambda value: value.update({"unexpected": True})),
+        ("state", lambda value: value.update({"revision": True})),
+        ("state", lambda value: value.update({"revision": 0.5})),
+        ("state", lambda value: value.update({"retryable": 0})),
+    ],
+)
+def test_run_records_require_exact_schema_keys_and_types(
+    tmp_path: Path,
+    record: str,
+    mutation,
+) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AnalysisStore.initialize(tmp_path)
+    spec = AnalysisSpec.create(
+        asset_id="sha256:" + ("a" * 64),
+        timebase=Timebase(8_000, 8_000),
+        analyzed_range=FrameRange(0, 8_000),
+    )
+    run = store.create_run(spec, source_id="src_" + ("a" * 32))
+    if record == "run":
+        path = store.runs / run.id / "request.json"
+        loader = lambda: store.load_run(run.id)
+    else:
+        path = store.runs / run.id / "events" / "00000000.json"
+        loader = lambda: store.load_state(run.id)
+    value = json.loads(path.read_text(encoding="utf-8"))
+    mutation(value)
+    overwrite_private_json(path, value)
+
+    with pytest.raises(AnalysisError) as rejected:
+        loader()
+
+    assert rejected.value.code == "analysis_storage_integrity"
+
+
+def test_run_and_state_records_are_bound_to_requested_paths(tmp_path: Path) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AnalysisStore.initialize(tmp_path)
+    spec = AnalysisSpec.create(
+        asset_id="sha256:" + ("a" * 64),
+        timebase=Timebase(8_000, 8_000),
+        analyzed_range=FrameRange(0, 8_000),
+    )
+    first = store.create_run(spec, source_id="src_" + ("a" * 32))
+    second = store.create_run(spec, source_id="src_" + ("b" * 32))
+    first_request = store.runs / first.id / "request.json"
+    second_request = store.runs / second.id / "request.json"
+    first_event = store.runs / first.id / "events" / "00000000.json"
+    second_event = store.runs / second.id / "events" / "00000000.json"
+
+    first_request.write_bytes(second_request.read_bytes())
+    with pytest.raises(AnalysisError) as run_rejected:
+        store.load_run(first.id)
+
+    first_event.write_bytes(second_event.read_bytes())
+    with pytest.raises(AnalysisError) as state_rejected:
+        store.load_state(first.id)
+
+    assert run_rejected.value.code == "analysis_storage_integrity"
+    assert state_rejected.value.code == "analysis_storage_integrity"
+
+
+def test_state_event_revision_is_bound_to_filename(tmp_path: Path) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AnalysisStore.initialize(tmp_path)
+    spec = AnalysisSpec.create(
+        asset_id="sha256:" + ("a" * 64),
+        timebase=Timebase(8_000, 8_000),
+        analyzed_range=FrameRange(0, 8_000),
+    )
+    run = store.create_run(spec, source_id="src_" + ("a" * 32))
+    event = store.runs / run.id / "events" / "00000000.json"
+    value = json.loads(event.read_text(encoding="utf-8"))
+    value["revision"] = 1
+    overwrite_private_json(event, value)
+
+    with pytest.raises(AnalysisError) as rejected:
+        store.load_state(run.id)
+
+    assert rejected.value.code == "analysis_storage_integrity"
+
+
+def test_spec_and_timeline_records_require_exact_contract_and_path_identity(
+    tmp_path: Path,
+) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AnalysisStore.initialize(tmp_path)
+    first = AnalysisSpec.create(
+        asset_id="sha256:" + ("a" * 64),
+        timebase=Timebase(8_000, 8_000),
+        analyzed_range=FrameRange(0, 8_000),
+    )
+    second = AnalysisSpec.create(
+        asset_id="sha256:" + ("b" * 64),
+        timebase=Timebase(8_000, 8_000),
+        analyzed_range=FrameRange(0, 8_000),
+    )
+    store.publish_spec(first)
+    store.publish_spec(second)
+    first_path = store._digest_path(store.specs, first.id)
+    second_path = store._digest_path(store.specs, second.id)
+    first_payload = first_path.read_bytes()
+    first_path.write_bytes(second_path.read_bytes())
+
+    with pytest.raises(AnalysisError) as spec_rejected:
+        store.load_spec(first.id)
+    first_path.write_bytes(first_payload)
+
+    first_timeline = ChordCandidateTimeline.create(
+        spec_id=first.id,
+        timebase=first.timebase,
+        analyzed_range=first.analyzed_range,
+        result_kind="no_candidates",
+        beats=(),
+        tempo_hypotheses=(),
+        key_hypotheses=(),
+        segments=(),
+        engine=first.config.engine,
+    )
+    second_timeline = ChordCandidateTimeline.create(
+        spec_id=second.id,
+        timebase=second.timebase,
+        analyzed_range=second.analyzed_range,
+        result_kind="no_candidates",
+        beats=(),
+        tempo_hypotheses=(),
+        key_hypotheses=(),
+        segments=(),
+        engine=second.config.engine,
+    )
+    first_timeline_path = store._digest_path(
+        store.timelines,
+        first_timeline.id,
+        create=True,
+    )
+    second_timeline_path = store._digest_path(
+        store.timelines,
+        second_timeline.id,
+        create=True,
+    )
+    store._publish_immutable(first_timeline_path, first_timeline.to_record_mapping())
+    store._publish_immutable(second_timeline_path, second_timeline.to_record_mapping())
+    first_timeline_path.write_bytes(second_timeline_path.read_bytes())
+    run = store.create_run(first, source_id="src_" + ("a" * 32))
+    store.transition(run.id, "running")
+    store.transition(run.id, "succeeded", timeline_id=first_timeline.id)
+    store._publish_immutable(
+        store.runs / run.id / "output.json",
+        {"timeline_id": first_timeline.id},
+    )
+
+    with pytest.raises(AnalysisError) as timeline_rejected:
+        store.timeline_for_run(run.id)
+
+    assert spec_rejected.value.code == "analysis_storage_integrity"
+    assert timeline_rejected.value.code == "analysis_storage_integrity"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: value.update({"analysis_spec_schema_version": "9"}),
+        lambda value: value.update({"unexpected": True}),
+        lambda value: value["timebase"].update({"sample_rate": True}),
+        lambda value: value["analyzed_range"].update({"start_frame": 0.5}),
+        lambda value: value["config"].update({"random_seed": True}),
+        lambda value: value["config"].update({"unexpected": True}),
+    ],
+)
+def test_spec_reader_rejects_schema_key_and_integer_drift(
+    tmp_path: Path,
+    mutation,
+) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AnalysisStore.initialize(tmp_path)
+    spec = AnalysisSpec.create(
+        asset_id="sha256:" + ("a" * 64),
+        timebase=Timebase(8_000, 8_000),
+        analyzed_range=FrameRange(0, 8_000),
+    )
+    store.publish_spec(spec)
+    path = store._digest_path(store.specs, spec.id)
+    value = json.loads(path.read_text(encoding="utf-8"))
+    mutation(value)
+    overwrite_private_json(path, value)
+
+    with pytest.raises(AnalysisError) as rejected:
+        store.load_spec(spec.id)
+
+    assert rejected.value.code == "analysis_storage_integrity"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: value.update({"candidate_timeline_schema_version": "9"}),
+        lambda value: value.update({"unexpected": True}),
+        lambda value: value.update({"beats": [True]}),
+        lambda value: value["engine"].update({"unexpected": True}),
+    ],
+)
+def test_timeline_reader_rejects_schema_key_and_integer_drift(
+    mutation,
+) -> None:
+    timeline = ChordCandidateTimeline.create(
+        spec_id="sha256:" + ("a" * 64),
+        timebase=Timebase(8_000, 8_000),
+        analyzed_range=FrameRange(0, 8_000),
+        result_kind="no_candidates",
+        beats=(),
+        tempo_hypotheses=(),
+        key_hypotheses=(),
+        segments=(),
+        engine=EngineRef(),
+    )
+    value = timeline.to_record_mapping()
+    mutation(value)
+
+    with pytest.raises((TypeError, ValueError)):
+        timeline_from_mapping(value)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"id":"first","id":"second"}',
+        '{"value":0.5}',
+        '{"value":NaN}',
+        '{"value":Infinity}',
+    ],
+)
+def test_analysis_json_reader_rejects_duplicate_and_nonfinite_values(
+    tmp_path: Path,
+    payload: str,
+) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AnalysisStore.initialize(tmp_path)
+    path = store.tmp / "malformed.json"
+    path.write_text(payload, encoding="utf-8")
+    os.chmod(path, 0o600)
+
+    with pytest.raises(AnalysisError) as rejected:
+        store._read_json(path)
+
+    assert rejected.value.code == "analysis_storage_integrity"
 
 
 def test_state_cache_repairs_from_immutable_event(

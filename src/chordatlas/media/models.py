@@ -8,6 +8,28 @@ from typing import Any
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _ASSET_RE = re.compile(r"^sha256:([0-9a-f]{64})$")
 _SOURCE_RE = re.compile(r"^src_[0-9a-f]{32}$")
+_MEDIA_SCHEMA_VERSION = "1.0.0-draft"
+_SOURCE_SCHEMA_VERSION = "1.0.0-draft"
+_MEDIA_RECORD_KEYS = {
+    "media_schema_version",
+    "id",
+    "sha256",
+    "byte_length",
+    "container",
+    "codec",
+    "sample_rate",
+    "channels",
+    "sample_width_bytes",
+    "duration_frames",
+}
+_SOURCE_RECORD_KEYS = {
+    "source_schema_version",
+    "id",
+    "asset_id",
+    "display_name",
+    "authorization_basis",
+    "captured_at",
+}
 
 
 class MediaImportError(ValueError):
@@ -37,6 +59,8 @@ class FrameRange:
     end_frame: int
 
     def __post_init__(self) -> None:
+        if type(self.start_frame) is not int or type(self.end_frame) is not int:
+            raise TypeError("frame boundaries must be integers")
         if self.start_frame < 0:
             raise ValueError("start_frame must be non-negative")
         if self.end_frame <= self.start_frame:
@@ -61,13 +85,17 @@ class Timebase:
     duration_frames: int
 
     def __post_init__(self) -> None:
+        if type(self.sample_rate) is not int or type(self.duration_frames) is not int:
+            raise TypeError("timebase values must be integers")
         if self.sample_rate <= 0:
             raise ValueError("sample_rate must be positive")
         if self.duration_frames <= 0:
             raise ValueError("duration_frames must be positive")
 
     def clamp_frame(self, frame: int) -> int:
-        return min(max(int(frame), 0), self.duration_frames)
+        if type(frame) is not int:
+            raise TypeError("frame must be an integer")
+        return min(max(frame, 0), self.duration_frames)
 
     def seconds_to_frame(self, seconds: int | float | str | Decimal) -> int:
         try:
@@ -83,6 +111,8 @@ class Timebase:
         return self.clamp_frame(frame) / self.sample_rate
 
     def validate_range(self, value: FrameRange) -> FrameRange:
+        if type(value) is not FrameRange:
+            raise TypeError("value must be a FrameRange")
         if value.end_frame > self.duration_frames:
             raise ValueError("frame range exceeds media duration")
         return value
@@ -110,6 +140,22 @@ class MediaAsset:
     duration_frames: int
 
     def __post_init__(self) -> None:
+        if not all(
+            type(value) is str
+            for value in (self.id, self.sha256, self.container, self.codec)
+        ):
+            raise TypeError("MediaAsset string fields must be strings")
+        if not all(
+            type(value) is int
+            for value in (
+                self.byte_length,
+                self.sample_rate,
+                self.channels,
+                self.sample_width_bytes,
+                self.duration_frames,
+            )
+        ):
+            raise TypeError("MediaAsset integer fields must be integers")
         match = _ASSET_RE.fullmatch(self.id)
         if match is None or match.group(1) != self.sha256:
             raise ValueError("MediaAsset.id must match its SHA-256 digest")
@@ -131,7 +177,7 @@ class MediaAsset:
 
     def to_record_mapping(self) -> dict[str, Any]:
         return {
-            "media_schema_version": "1.0.0-draft",
+            "media_schema_version": _MEDIA_SCHEMA_VERSION,
             "id": self.id,
             "sha256": self.sha256,
             "byte_length": self.byte_length,
@@ -156,16 +202,20 @@ class MediaAsset:
 
     @classmethod
     def from_record_mapping(cls, value: dict[str, Any]) -> MediaAsset:
+        if type(value) is not dict or set(value) != _MEDIA_RECORD_KEYS:
+            raise ValueError("MediaAsset record keys are invalid")
+        if value.get("media_schema_version") != _MEDIA_SCHEMA_VERSION:
+            raise ValueError("MediaAsset schema version is invalid")
         return cls(
-            id=str(value["id"]),
-            sha256=str(value["sha256"]),
-            byte_length=int(value["byte_length"]),
-            container=str(value["container"]),
-            codec=str(value["codec"]),
-            sample_rate=int(value["sample_rate"]),
-            channels=int(value["channels"]),
-            sample_width_bytes=int(value["sample_width_bytes"]),
-            duration_frames=int(value["duration_frames"]),
+            id=value["id"],
+            sha256=value["sha256"],
+            byte_length=value["byte_length"],
+            container=value["container"],
+            codec=value["codec"],
+            sample_rate=value["sample_rate"],
+            channels=value["channels"],
+            sample_width_bytes=value["sample_width_bytes"],
+            duration_frames=value["duration_frames"],
         )
 
 
@@ -180,6 +230,17 @@ class SourceReference:
     captured_at: str
 
     def __post_init__(self) -> None:
+        if not all(
+            type(value) is str
+            for value in (
+                self.id,
+                self.asset_id,
+                self.display_name,
+                self.authorization_basis,
+                self.captured_at,
+            )
+        ):
+            raise TypeError("SourceReference fields must be strings")
         if _SOURCE_RE.fullmatch(self.id) is None:
             raise ValueError("SourceReference.id is invalid")
         if _ASSET_RE.fullmatch(self.asset_id) is None:
@@ -188,10 +249,12 @@ class SourceReference:
             raise ValueError("SourceReference.display_name is invalid")
         if self.authorization_basis != "user_attested_authorized":
             raise ValueError("SourceReference.authorization_basis is invalid")
+        if not self.captured_at:
+            raise ValueError("SourceReference.captured_at is invalid")
 
     def to_record_mapping(self) -> dict[str, Any]:
         return {
-            "source_schema_version": "1.0.0-draft",
+            "source_schema_version": _SOURCE_SCHEMA_VERSION,
             "id": self.id,
             "asset_id": self.asset_id,
             "display_name": self.display_name,
@@ -209,12 +272,16 @@ class SourceReference:
 
     @classmethod
     def from_record_mapping(cls, value: dict[str, Any]) -> SourceReference:
+        if type(value) is not dict or set(value) != _SOURCE_RECORD_KEYS:
+            raise ValueError("SourceReference record keys are invalid")
+        if value.get("source_schema_version") != _SOURCE_SCHEMA_VERSION:
+            raise ValueError("SourceReference schema version is invalid")
         return cls(
-            id=str(value["id"]),
-            asset_id=str(value["asset_id"]),
-            display_name=str(value["display_name"]),
-            authorization_basis=str(value["authorization_basis"]),
-            captured_at=str(value["captured_at"]),
+            id=value["id"],
+            asset_id=value["asset_id"],
+            display_name=value["display_name"],
+            authorization_basis=value["authorization_basis"],
+            captured_at=value["captured_at"],
         )
 
 
@@ -275,6 +342,8 @@ class WaveformBucket:
 
     def __post_init__(self) -> None:
         FrameRange(self.start_frame, self.end_frame)
+        if type(self.min_q15) is not int or type(self.max_q15) is not int:
+            raise TypeError("waveform peaks must be integers")
         if not (-32768 <= self.min_q15 <= self.max_q15 <= 32767):
             raise ValueError("waveform peaks must be signed Q15 values")
 
@@ -295,6 +364,8 @@ class Waveform:
     buckets: tuple[WaveformBucket, ...]
 
     def __post_init__(self) -> None:
+        if type(self.bucket_frames) is not int:
+            raise TypeError("bucket_frames must be an integer")
         if self.algorithm != "pcm16-folded-peak-v1":
             raise ValueError("unsupported waveform algorithm")
         if self.bucket_frames <= 0:

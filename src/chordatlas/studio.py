@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import secrets
 import socket
 import sys
@@ -1088,21 +1089,26 @@ class StudioHandler(BaseHTTPRequestHandler):
                 "content_length_required",
                 "A single Content-Length is required.",
             )
-        try:
-            length = int(lengths[0])
-        except ValueError:
+        if re.fullmatch(r"[0-9]+", lengths[0]) is None:
             raise PracticeError(
                 "invalid_content_length",
                 "Content-Length must be an integer.",
-            ) from None
+            )
+        length = int(lengths[0])
         if not 0 <= length <= max_bytes:
             raise PracticeError(
                 "request_too_large",
                 "The practice request is too large.",
             )
+        body = self.rfile.read(length)
+        if len(body) != length:
+            raise PracticeError(
+                "invalid_json",
+                "The practice request body is truncated.",
+            )
         try:
             value = json.loads(
-                self.rfile.read(length) or b"{}",
+                body or b"{}",
                 object_pairs_hook=_reject_duplicate_json_keys,
                 parse_constant=_reject_json_constant,
             )
@@ -1274,15 +1280,21 @@ class StudioHandler(BaseHTTPRequestHandler):
         lengths = self.headers.get_all("Content-Length", failobj=[])
         if len(lengths) != 1:
             raise AnalysisError("content_length_required", "A single Content-Length is required.")
-        try:
-            length = int(lengths[0])
-        except ValueError:
-            raise AnalysisError("invalid_content_length", "Content-Length must be an integer.") from None
+        if re.fullmatch(r"[0-9]+", lengths[0]) is None:
+            raise AnalysisError("invalid_content_length", "Content-Length must be an integer.")
+        length = int(lengths[0])
         if not 0 <= length <= max_bytes:
             raise AnalysisError("request_too_large", "The analysis request is too large.")
+        body = self.rfile.read(length)
+        if len(body) != length:
+            raise AnalysisError("invalid_json", "The request body is truncated.")
         try:
-            value = json.loads(self.rfile.read(length) or b"{}")
-        except (json.JSONDecodeError, ValueError):
+            value = json.loads(
+                body or b"{}",
+                object_pairs_hook=_reject_duplicate_json_keys,
+                parse_constant=_reject_json_constant,
+            )
+        except (json.JSONDecodeError, UnicodeError, ValueError):
             raise AnalysisError("invalid_json", "The analysis request must be valid JSON.") from None
         if not isinstance(value, dict):
             raise AnalysisError("invalid_json", "The analysis request must be a JSON object.")

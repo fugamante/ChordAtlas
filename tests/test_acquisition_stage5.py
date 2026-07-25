@@ -73,6 +73,61 @@ class _RawSocket:
         return
 
 
+def test_acquisition_request_is_bound_to_requested_path_identity(tmp_path: Path) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AcquisitionStore.initialize(tmp_path)
+    first = store.create_request(
+        normalized_url="https://audio.example/first",
+        display_name="first.wav",
+        retry_of=None,
+    )
+    second = store.create_request(
+        normalized_url="https://audio.example/second",
+        display_name="second.wav",
+        retry_of=None,
+    )
+    first_path = store.requests_root / f"{first.id}.json"
+    second_path = store.requests_root / f"{second.id}.json"
+    first_path.write_bytes(second_path.read_bytes())
+
+    with pytest.raises(AcquisitionError) as rejected:
+        store.load_request(first.id)
+
+    assert rejected.value.code == "acquisition_storage_integrity"
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("acquisition_schema_version", "2.0.0"),
+        ("unexpected", True),
+        ("display_name", 7),
+        ("retry_of", False),
+    ),
+)
+def test_acquisition_request_requires_exact_schema_keys_and_types(
+    tmp_path: Path,
+    field: str,
+    replacement,
+) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AcquisitionStore.initialize(tmp_path)
+    request = store.create_request(
+        normalized_url="https://audio.example/take",
+        display_name="take.wav",
+        retry_of=None,
+    )
+    path = store.requests_root / f"{request.id}.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value[field] = replacement
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(AcquisitionError) as rejected:
+        store.load_request(request.id)
+
+    assert rejected.value.code == "acquisition_storage_integrity"
+
+
 class _TlsSocket:
     def __init__(self, response: bytes, peer: str) -> None:
         self.response = response

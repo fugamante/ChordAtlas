@@ -24,7 +24,9 @@ from chordatlas.analysis.models import (
     VALID_TRANSITIONS,
     canonical_json,
     config_from_mapping,
+    run_from_mapping,
     spec_from_mapping,
+    state_from_mapping,
     timeline_from_mapping,
 )
 
@@ -69,7 +71,12 @@ class AnalysisStore:
 
     def load_spec(self, spec_id: str) -> AnalysisSpec:
         try:
-            return spec_from_mapping(self._read_json(self._digest_path(self.specs, spec_id)))
+            spec = spec_from_mapping(
+                self._read_json(self._digest_path(self.specs, spec_id))
+            )
+            if spec.id != spec_id:
+                raise _integrity_error()
+            return spec
         except AnalysisError:
             raise
         except (KeyError, TypeError, ValueError):
@@ -133,14 +140,12 @@ class AnalysisStore:
     def load_run(self, run_id: str) -> AnalysisRun:
         _validate_run_id(run_id)
         try:
-            value = self._read_json(self.runs / run_id / "request.json")
-            return AnalysisRun(
-                id=str(value["id"]),
-                spec_id=str(value["spec_id"]),
-                source_id=str(value["source_id"]),
-                created_at=str(value["created_at"]),
-                retry_of=None if value["retry_of"] is None else str(value["retry_of"]),
+            run = run_from_mapping(
+                self._read_json(self.runs / run_id / "request.json")
             )
+            if run.id != run_id:
+                raise _integrity_error()
+            return run
         except AnalysisError:
             raise
         except (KeyError, TypeError, ValueError):
@@ -156,12 +161,19 @@ class AnalysisStore:
             ]
             if not events:
                 raise _integrity_error()
-            latest = _state_from_mapping(self._read_json(events[-1]))
+            latest = state_from_mapping(self._read_json(events[-1]))
+            if (
+                latest.run_id != run_id
+                or events[-1].name != f"{latest.revision:08d}.json"
+            ):
+                raise _integrity_error()
             try:
-                cached = _state_from_mapping(self._read_json(run_dir / "state.json"))
+                cached = state_from_mapping(self._read_json(run_dir / "state.json"))
             except AnalysisError:
                 self._replace_state(run_dir / "state.json", latest)
                 return latest
+            if cached.run_id != run_id:
+                raise _integrity_error()
             if latest.revision < cached.revision:
                 raise _integrity_error()
             if latest.revision > cached.revision:
@@ -252,12 +264,15 @@ class AnalysisStore:
                 "A candidate timeline is available only after successful analysis.",
             )
         output = self._read_json(self.runs / run_id / "output.json")
-        if output.get("timeline_id") != state.timeline_id:
+        if set(output) != {"timeline_id"} or output["timeline_id"] != state.timeline_id:
             raise _integrity_error()
         try:
-            return timeline_from_mapping(
+            timeline = timeline_from_mapping(
                 self._read_json(self._digest_path(self.timelines, state.timeline_id))
             )
+            if timeline.id != state.timeline_id:
+                raise _integrity_error()
+            return timeline
         except AnalysisError:
             raise
         except (KeyError, TypeError, ValueError):
@@ -439,8 +454,13 @@ class AnalysisStore:
                 != (after.st_dev, after.st_ino, after.st_size)
             ):
                 raise _integrity_error()
-            value = json.loads(payload.decode("utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
+            value = json.loads(
+                payload.decode("utf-8"),
+                object_pairs_hook=_strict_object,
+                parse_constant=_reject_constant,
+                parse_float=_reject_float,
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
             raise _integrity_error() from None
         finally:
             os.close(descriptor)
@@ -468,21 +488,6 @@ def _public_run(run: AnalysisRun, state: RunState, spec: AnalysisSpec) -> dict[s
             "determinism": "deterministic",
         },
     }
-
-
-def _state_from_mapping(value: dict[str, Any]) -> RunState:
-    return RunState(
-        run_id=str(value["run_id"]),
-        revision=int(value["revision"]),
-        status=str(value["status"]),
-        updated_at=str(value["updated_at"]),
-        failure_code=None if value["failure_code"] is None else str(value["failure_code"]),
-        failure_message=(
-            None if value["failure_message"] is None else str(value["failure_message"])
-        ),
-        retryable=bool(value["retryable"]),
-        timeline_id=None if value["timeline_id"] is None else str(value["timeline_id"]),
-    )
 
 
 def _validate_run_id(value: str) -> None:
@@ -568,6 +573,23 @@ def _integrity_error() -> AnalysisError:
         "Private analysis storage failed an integrity check.",
         retryable=False,
     )
+
+
+def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate analysis record key")
+        value[key] = item
+    return value
+
+
+def _reject_constant(value: str) -> Any:
+    raise ValueError(f"non-finite analysis JSON value: {value}")
+
+
+def _reject_float(value: str) -> Any:
+    raise ValueError(f"floating-point analysis JSON value: {value}")
 
 
 def _utc_now() -> str:

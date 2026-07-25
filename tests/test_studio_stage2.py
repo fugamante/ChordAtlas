@@ -10,11 +10,15 @@ import time
 import wave
 from collections.abc import Iterator
 from contextlib import contextmanager
+from email.message import Message
 from http import HTTPStatus
 from importlib import resources
 from pathlib import Path
 
-from chordatlas.studio import StudioServer, create_server
+import pytest
+
+from chordatlas.analysis import AnalysisError
+from chordatlas.studio import StudioHandler, StudioServer, create_server
 
 
 def progression_wav(sample_rate: int = 8_000) -> bytes:
@@ -93,6 +97,34 @@ def bootstrap(server: StudioServer) -> str:
     )
     assert status == HTTPStatus.OK
     return headers["Set-Cookie"].split(";", 1)[0]
+
+
+def test_shared_json_reader_rejects_ambiguous_or_invalid_bodies() -> None:
+    cases = (
+        ([str(len(b'{"key":1,"key":2}'))], b'{"key":1,"key":2}'),
+        ([str(len(b'{"key":NaN}'))], b'{"key":NaN}'),
+        ([str(len(b"[]"))], b"[]"),
+        (["8"], b'{"key":'),
+        ([str(len(b'{"key":1}x'))], b'{"key":1}x'),
+        (["2", "2"], b"{}"),
+        (["+2"], b"{}"),
+    )
+
+    for lengths, body in cases:
+        handler = StudioHandler.__new__(StudioHandler)
+        handler.headers = Message()
+        for length in lengths:
+            handler.headers.add_header("Content-Length", length)
+        handler.rfile = io.BytesIO(body)
+
+        with pytest.raises(AnalysisError) as rejected:
+            handler._read_json_body(max_bytes=1024)
+
+        assert rejected.value.code in {
+            "content_length_required",
+            "invalid_content_length",
+            "invalid_json",
+        }
 
 
 def import_source(server: StudioServer, cookie: str) -> dict:

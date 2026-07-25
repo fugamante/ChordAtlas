@@ -49,6 +49,8 @@ class PlaybackController:
         return self._state
 
     def seek(self, frame: int) -> PlaybackState:
+        if type(frame) is not int:
+            raise TypeError("frame must be an integer")
         self._state = PlaybackState(
             position_frame=self.timebase.clamp_frame(frame),
             playing=self._state.playing,
@@ -70,6 +72,8 @@ class PlaybackController:
         return self._state
 
     def advance(self, frames: int) -> PlaybackState:
+        if type(frames) is not int:
+            raise TypeError("frames must be an integer")
         if frames < 0:
             raise ValueError("frames must be non-negative")
         if not self._state.playing or frames == 0:

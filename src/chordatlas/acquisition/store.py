@@ -281,13 +281,16 @@ class AcquisitionStore:
         self._verify_anchor()
         _validate_run_id(run_id)
         try:
-            return AcquisitionRequest.from_mapping(
+            request = AcquisitionRequest.from_mapping(
                 _read_json(self.requests_root / f"{run_id}.json", self.anchor)
             )
         except AcquisitionError:
             raise
         except (KeyError, TypeError, ValueError):
             raise _integrity_error() from None
+        if request.id != run_id:
+            raise _integrity_error()
+        return request
 
     def private_url(self, run_id: str) -> str:
         self._verify_anchor()

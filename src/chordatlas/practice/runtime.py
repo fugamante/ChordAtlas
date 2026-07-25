@@ -29,6 +29,12 @@ class PracticePlaybackController:
         count_in_beats: int,
         repeat: bool = True,
     ) -> None:
+        if type(rate_milli) is not int:
+            raise TypeError("practice rate must be an integer")
+        if type(count_in_beats) is not int:
+            raise TypeError("count-in beat count must be an integer")
+        if type(repeat) is not bool:
+            raise TypeError("repeat must be a boolean")
         timebase.validate_range(loop)
         if not MIN_RATE_MILLI <= rate_milli <= MAX_RATE_MILLI:
             raise ValueError("practice rate is outside the supported range")
@@ -90,6 +96,8 @@ class PracticePlaybackController:
         return self._state
 
     def seek(self, frame: int) -> PracticeRuntimeState:
+        if type(frame) is not int:
+            raise TypeError("frame must be an integer")
         if not self._state.loop.start_frame <= frame < self._state.loop.end_frame:
             raise ValueError("practice seek must stay inside the selected range")
         self._state = PracticeRuntimeState(
@@ -104,6 +112,8 @@ class PracticePlaybackController:
         return self._state
 
     def advance_source_frames(self, frames: int) -> PracticeRuntimeState:
+        if type(frames) is not int:
+            raise TypeError("frames must be an integer")
         if frames < 0:
             raise ValueError("frames must be non-negative")
         if not self._state.playing or frames == 0:
@@ -133,6 +143,8 @@ class PracticePlaybackController:
         return self._state
 
     def wall_milliseconds_for_source_frames(self, frames: int) -> int:
+        if type(frames) is not int:
+            raise TypeError("frames must be an integer")
         if frames < 0:
             raise ValueError("frames must be non-negative")
         divisor = self.timebase.sample_rate * self._state.rate_milli

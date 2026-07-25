@@ -83,7 +83,7 @@ class EngineRef:
             self.vocabulary_id,
             self.vocabulary_version,
         ):
-            if not value or len(value) > 80:
+            if type(value) is not str or not value or len(value) > 80:
                 raise ValueError("engine metadata is invalid")
         if self.engine_id != "chordatlas.baseline":
             raise ValueError("engine is not allowlisted")
@@ -106,6 +106,8 @@ class AnalysisConfig:
     random_seed: int = 0
 
     def __post_init__(self) -> None:
+        if not isinstance(self.engine, EngineRef):
+            raise ValueError("analysis engine reference is invalid")
         allowed = {"target_rate", "window_frames", "hop_frames", "min_bpm", "max_bpm"}
         names = [name for name, _value in self.parameters]
         if names != sorted(names) or len(names) != len(set(names)) or set(names) != allowed:
@@ -127,7 +129,7 @@ class AnalysisConfig:
             raise ValueError("hop_frames is outside the safe baseline range")
         if not 40 <= values["min_bpm"] < values["max_bpm"] <= 240:
             raise ValueError("tempo bounds are invalid")
-        if self.random_seed != 0:
+        if type(self.random_seed) is not int or self.random_seed != 0:
             raise ValueError("baseline-v1 is deterministic and requires seed 0")
 
     @classmethod
@@ -214,15 +216,23 @@ class ChordCandidate:
     normalization_note: str = ""
 
     def __post_init__(self) -> None:
-        if not self.raw_label or len(self.raw_label) > 64:
+        if type(self.raw_label) is not str or not self.raw_label or len(self.raw_label) > 64:
             raise ValueError("candidate raw label is invalid")
-        if self.canonical_symbol is not None and _SYMBOL_RE.fullmatch(self.canonical_symbol) is None:
+        if self.canonical_symbol is not None and (
+            type(self.canonical_symbol) is not str
+            or _SYMBOL_RE.fullmatch(self.canonical_symbol) is None
+        ):
             raise ValueError("candidate canonical symbol is outside the baseline vocabulary")
-        if self.rank <= 0 or not 0 <= self.confidence_ppm <= 1_000_000:
+        if (
+            type(self.rank) is not int
+            or type(self.confidence_ppm) is not int
+            or self.rank <= 0
+            or not 0 <= self.confidence_ppm <= 1_000_000
+        ):
             raise ValueError("candidate rank or confidence is invalid")
-        if self.normalization not in {"exact", "unmapped"}:
+        if type(self.normalization) is not str or self.normalization not in {"exact", "unmapped"}:
             raise ValueError("candidate normalization is invalid")
-        if len(self.normalization_note) > 160:
+        if type(self.normalization_note) is not str or len(self.normalization_note) > 160:
             raise ValueError("candidate normalization note is invalid")
 
     def to_mapping(self) -> dict[str, Any]:
@@ -245,7 +255,12 @@ class ChordSegment:
     no_chord_probability_ppm: int
 
     def __post_init__(self) -> None:
-        if self.ordinal < 0 or self.state not in {"chord", "no_chord", "unknown"}:
+        if (
+            type(self.ordinal) is not int
+            or type(self.state) is not str
+            or self.ordinal < 0
+            or self.state not in {"chord", "no_chord", "unknown"}
+        ):
             raise ValueError("segment ordinal or state is invalid")
         ranks = [candidate.rank for candidate in self.candidates]
         if len(self.candidates) > 8:
@@ -266,7 +281,10 @@ class ChordSegment:
             )
         ):
             raise ValueError("no-chord segment requires no-chord candidates")
-        if not 0 <= self.no_chord_probability_ppm <= 1_000_000:
+        if (
+            type(self.no_chord_probability_ppm) is not int
+            or not 0 <= self.no_chord_probability_ppm <= 1_000_000
+        ):
             raise ValueError("no-chord probability is invalid")
 
     def to_mapping(self) -> dict[str, Any]:
@@ -285,9 +303,12 @@ class TempoHypothesis:
     confidence_ppm: int
 
     def __post_init__(self) -> None:
-        if not 20_000 <= self.bpm_milli <= 400_000:
+        if type(self.bpm_milli) is not int or not 20_000 <= self.bpm_milli <= 400_000:
             raise ValueError("tempo is outside the supported domain")
-        if not 0 <= self.confidence_ppm <= 1_000_000:
+        if (
+            type(self.confidence_ppm) is not int
+            or not 0 <= self.confidence_ppm <= 1_000_000
+        ):
             raise ValueError("tempo confidence is invalid")
 
     def to_mapping(self) -> dict[str, int]:
@@ -300,9 +321,12 @@ class KeyHypothesis:
     confidence_ppm: int
 
     def __post_init__(self) -> None:
-        if not self.label or len(self.label) > 32:
+        if type(self.label) is not str or not self.label or len(self.label) > 32:
             raise ValueError("key label is invalid")
-        if not 0 <= self.confidence_ppm <= 1_000_000:
+        if (
+            type(self.confidence_ppm) is not int
+            or not 0 <= self.confidence_ppm <= 1_000_000
+        ):
             raise ValueError("key confidence is invalid")
 
     def to_mapping(self) -> dict[str, Any]:
@@ -336,6 +360,8 @@ class ChordCandidateTimeline:
             raise ValueError("timeline has too many global hypotheses")
         if len(self.segments) > 50_000:
             raise ValueError("timeline has too many segments")
+        if any(type(beat) is not int for beat in self.beats):
+            raise ValueError("beats must be integers")
         if tuple(sorted(set(self.beats))) != self.beats:
             raise ValueError("beats must be unique and ordered")
         if any(not (self.analyzed_range.start_frame <= beat < self.analyzed_range.end_frame) for beat in self.beats):
@@ -427,13 +453,21 @@ class AnalysisRun:
         return cls(f"run_{secrets.token_hex(16)}", spec_id, source_id, created_at, retry_of)
 
     def __post_init__(self) -> None:
-        if _RUN_RE.fullmatch(self.id) is None:
+        if type(self.id) is not str or _RUN_RE.fullmatch(self.id) is None:
             raise ValueError("run id is invalid")
-        if not self.spec_id.startswith("sha256:") or _DIGEST_RE.fullmatch(self.spec_id[7:]) is None:
+        if (
+            type(self.spec_id) is not str
+            or not self.spec_id.startswith("sha256:")
+            or _DIGEST_RE.fullmatch(self.spec_id[7:]) is None
+        ):
             raise ValueError("run spec id is invalid")
-        if _SOURCE_RE.fullmatch(self.source_id) is None:
+        if type(self.source_id) is not str or _SOURCE_RE.fullmatch(self.source_id) is None:
             raise ValueError("run source id is invalid")
-        if self.retry_of is not None and _RUN_RE.fullmatch(self.retry_of) is None:
+        if type(self.created_at) is not str or not self.created_at:
+            raise ValueError("run creation time is invalid")
+        if self.retry_of is not None and (
+            type(self.retry_of) is not str or _RUN_RE.fullmatch(self.retry_of) is None
+        ):
             raise ValueError("retry_of is invalid")
 
     def to_record_mapping(self) -> dict[str, Any]:
@@ -459,9 +493,14 @@ class RunState:
     timeline_id: str | None = None
 
     def __post_init__(self) -> None:
-        if _RUN_RE.fullmatch(self.run_id) is None or self.revision < 0:
+        if (
+            type(self.run_id) is not str
+            or _RUN_RE.fullmatch(self.run_id) is None
+            or type(self.revision) is not int
+            or self.revision < 0
+        ):
             raise ValueError("run state identity is invalid")
-        if self.status not in {
+        if type(self.status) is not str or self.status not in {
             "queued",
             "running",
             "cancel_requested",
@@ -470,6 +509,20 @@ class RunState:
             "succeeded",
         }:
             raise ValueError("run status is invalid")
+        if type(self.updated_at) is not str or not self.updated_at:
+            raise ValueError("run update time is invalid")
+        if self.failure_code is not None and type(self.failure_code) is not str:
+            raise ValueError("run failure code is invalid")
+        if self.failure_message is not None and type(self.failure_message) is not str:
+            raise ValueError("run failure message is invalid")
+        if type(self.retryable) is not bool:
+            raise ValueError("run retryable flag is invalid")
+        if self.timeline_id is not None and (
+            type(self.timeline_id) is not str
+            or not self.timeline_id.startswith("sha256:")
+            or _DIGEST_RE.fullmatch(self.timeline_id[7:]) is None
+        ):
+            raise ValueError("run timeline id is invalid")
         if self.status == "succeeded" and self.timeline_id is None:
             raise ValueError("successful run requires timeline")
         if self.status != "succeeded" and self.timeline_id is not None:
@@ -539,6 +592,18 @@ def _timeline_payload(
 
 
 def engine_from_mapping(value: dict[str, Any]) -> EngineRef:
+    _require_keys(
+        value,
+        {
+            "engine_id",
+            "engine_version",
+            "model_name",
+            "model_version",
+            "vocabulary_id",
+            "vocabulary_version",
+        },
+        "analysis engine",
+    )
     return EngineRef(
         engine_id=_mapping_str(value["engine_id"]),
         engine_version=_mapping_str(value["engine_version"]),
@@ -550,6 +615,13 @@ def engine_from_mapping(value: dict[str, Any]) -> EngineRef:
 
 
 def config_from_mapping(value: dict[str, Any]) -> AnalysisConfig:
+    _require_keys(
+        value,
+        {"engine", "parameters", "random_seed", "determinism"},
+        "analysis config",
+    )
+    if _mapping_str(value["determinism"]) != "deterministic":
+        raise ValueError("analysis determinism marker is invalid")
     parameters = value["parameters"]
     if not isinstance(parameters, dict):
         raise ValueError("analysis parameters must be a mapping")
@@ -563,8 +635,38 @@ def config_from_mapping(value: dict[str, Any]) -> AnalysisConfig:
 
 
 def spec_from_mapping(value: dict[str, Any]) -> AnalysisSpec:
+    _require_keys(
+        value,
+        {
+            "analysis_spec_schema_version",
+            "id",
+            "asset_id",
+            "timebase",
+            "analyzed_range",
+            "config",
+        },
+        "analysis spec",
+    )
+    _require_version(
+        value,
+        "analysis_spec_schema_version",
+        "1.0.0-draft",
+        "analysis spec",
+    )
     timebase = value["timebase"]
     frame_range = value["analyzed_range"]
+    _require_keys(
+        timebase,
+        {"sample_rate", "duration_frames", "unit"},
+        "analysis timebase",
+    )
+    if _mapping_str(timebase["unit"]) != "sample_frame":
+        raise ValueError("analysis timebase unit is invalid")
+    _require_keys(
+        frame_range,
+        {"start_frame", "end_frame"},
+        "analysis frame range",
+    )
     return AnalysisSpec(
         id=_mapping_str(value["id"]),
         asset_id=_mapping_str(value["asset_id"]),
@@ -581,25 +683,55 @@ def spec_from_mapping(value: dict[str, Any]) -> AnalysisSpec:
 
 
 def timeline_from_mapping(value: dict[str, Any]) -> ChordCandidateTimeline:
+    _require_keys(
+        value,
+        {
+            "candidate_timeline_schema_version",
+            "id",
+            "spec_id",
+            "timebase",
+            "analyzed_range",
+            "result_kind",
+            "beats",
+            "tempo_hypotheses",
+            "key_hypotheses",
+            "segments",
+            "engine",
+        },
+        "candidate timeline",
+    )
+    _require_version(
+        value,
+        "candidate_timeline_schema_version",
+        "1.0.0-draft",
+        "candidate timeline",
+    )
     timebase = value["timebase"]
     analyzed = value["analyzed_range"]
+    _require_keys(
+        timebase,
+        {"sample_rate", "duration_frames", "unit"},
+        "timeline timebase",
+    )
+    if _mapping_str(timebase["unit"]) != "sample_frame":
+        raise ValueError("timeline timebase unit is invalid")
+    _require_keys(analyzed, {"start_frame", "end_frame"}, "timeline analyzed range")
+    beats = _mapping_list(value["beats"], "timeline beats")
+    tempos = _mapping_list(value["tempo_hypotheses"], "tempo hypotheses")
+    keys = _mapping_list(value["key_hypotheses"], "key hypotheses")
+    raw_segments = _mapping_list(value["segments"], "timeline segments")
     segments = []
-    for item in value["segments"]:
+    for item in raw_segments:
+        _require_keys(
+            item,
+            {"ordinal", "range", "state", "candidates", "no_chord_probability_ppm"},
+            "chord segment",
+        )
         frame_range = item["range"]
+        _require_keys(frame_range, {"start_frame", "end_frame"}, "segment frame range")
+        raw_candidates = _mapping_list(item["candidates"], "segment candidates")
         candidates = tuple(
-            ChordCandidate(
-                raw_label=_mapping_str(candidate["raw_label"]),
-                canonical_symbol=(
-                    None
-                    if candidate["canonical_symbol"] is None
-                    else _mapping_str(candidate["canonical_symbol"])
-                ),
-                rank=_mapping_int(candidate["rank"]),
-                confidence_ppm=_mapping_int(candidate["confidence_ppm"]),
-                normalization=_mapping_str(candidate["normalization"]),
-                normalization_note=_mapping_str(candidate["normalization_note"]),
-            )
-            for candidate in item["candidates"]
+            _candidate_from_mapping(candidate) for candidate in raw_candidates
         )
         segments.append(
             ChordSegment(
@@ -625,33 +757,159 @@ def timeline_from_mapping(value: dict[str, Any]) -> ChordCandidateTimeline:
             _mapping_int(analyzed["end_frame"]),
         ),
         result_kind=_mapping_str(value["result_kind"]),
-        beats=tuple(_mapping_int(item) for item in value["beats"]),
+        beats=tuple(_mapping_int(item) for item in beats),
         tempo_hypotheses=tuple(
-            TempoHypothesis(
-                _mapping_int(item["bpm_milli"]),
-                _mapping_int(item["confidence_ppm"]),
-            )
-            for item in value["tempo_hypotheses"]
+            _tempo_from_mapping(item) for item in tempos
         ),
         key_hypotheses=tuple(
-            KeyHypothesis(
-                _mapping_str(item["label"]),
-                _mapping_int(item["confidence_ppm"]),
-            )
-            for item in value["key_hypotheses"]
+            _key_from_mapping(item) for item in keys
         ),
         segments=tuple(segments),
         engine=engine_from_mapping(value["engine"]),
     )
 
 
+def run_from_mapping(value: dict[str, Any]) -> AnalysisRun:
+    _require_keys(
+        value,
+        {
+            "analysis_run_schema_version",
+            "id",
+            "spec_id",
+            "source_id",
+            "created_at",
+            "retry_of",
+        },
+        "analysis run",
+    )
+    _require_version(
+        value,
+        "analysis_run_schema_version",
+        "1.0.0-draft",
+        "analysis run",
+    )
+    return AnalysisRun(
+        id=_mapping_str(value["id"]),
+        spec_id=_mapping_str(value["spec_id"]),
+        source_id=_mapping_str(value["source_id"]),
+        created_at=_mapping_str(value["created_at"]),
+        retry_of=_mapping_optional_str(value["retry_of"]),
+    )
+
+
+def state_from_mapping(value: dict[str, Any]) -> RunState:
+    _require_keys(
+        value,
+        {
+            "run_state_schema_version",
+            "run_id",
+            "revision",
+            "status",
+            "updated_at",
+            "failure_code",
+            "failure_message",
+            "retryable",
+            "timeline_id",
+        },
+        "analysis run state",
+    )
+    _require_version(
+        value,
+        "run_state_schema_version",
+        "1.0.0-draft",
+        "analysis run state",
+    )
+    return RunState(
+        run_id=_mapping_str(value["run_id"]),
+        revision=_mapping_int(value["revision"]),
+        status=_mapping_str(value["status"]),
+        updated_at=_mapping_str(value["updated_at"]),
+        failure_code=_mapping_optional_str(value["failure_code"]),
+        failure_message=_mapping_optional_str(value["failure_message"]),
+        retryable=_mapping_bool(value["retryable"]),
+        timeline_id=_mapping_optional_str(value["timeline_id"]),
+    )
+
+
+def _candidate_from_mapping(value: Any) -> ChordCandidate:
+    _require_keys(
+        value,
+        {
+            "raw_label",
+            "canonical_symbol",
+            "rank",
+            "confidence_ppm",
+            "normalization",
+            "normalization_note",
+        },
+        "chord candidate",
+    )
+    return ChordCandidate(
+        raw_label=_mapping_str(value["raw_label"]),
+        canonical_symbol=_mapping_optional_str(value["canonical_symbol"]),
+        rank=_mapping_int(value["rank"]),
+        confidence_ppm=_mapping_int(value["confidence_ppm"]),
+        normalization=_mapping_str(value["normalization"]),
+        normalization_note=_mapping_str(value["normalization_note"]),
+    )
+
+
+def _tempo_from_mapping(value: Any) -> TempoHypothesis:
+    _require_keys(value, {"bpm_milli", "confidence_ppm"}, "tempo hypothesis")
+    return TempoHypothesis(
+        _mapping_int(value["bpm_milli"]),
+        _mapping_int(value["confidence_ppm"]),
+    )
+
+
+def _key_from_mapping(value: Any) -> KeyHypothesis:
+    _require_keys(value, {"label", "confidence_ppm"}, "key hypothesis")
+    return KeyHypothesis(
+        _mapping_str(value["label"]),
+        _mapping_int(value["confidence_ppm"]),
+    )
+
+
 def _mapping_int(value: Any) -> int:
-    if not isinstance(value, int) or isinstance(value, bool):
+    if type(value) is not int:
         raise ValueError("analysis record integer is invalid")
     return value
 
 
 def _mapping_str(value: Any) -> str:
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise ValueError("analysis record string is invalid")
     return value
+
+
+def _mapping_bool(value: Any) -> bool:
+    if type(value) is not bool:
+        raise ValueError("analysis record boolean is invalid")
+    return value
+
+
+def _mapping_optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    return _mapping_str(value)
+
+
+def _mapping_list(value: Any, name: str) -> list[Any]:
+    if type(value) is not list:
+        raise ValueError(f"{name} must be a list")
+    return value
+
+
+def _require_keys(value: Any, expected: set[str], name: str) -> None:
+    if type(value) is not dict or set(value) != expected:
+        raise ValueError(f"{name} keys are invalid")
+
+
+def _require_version(
+    value: dict[str, Any],
+    key: str,
+    expected: str,
+    name: str,
+) -> None:
+    if _mapping_str(value[key]) != expected:
+        raise ValueError(f"{name} schema version is unsupported")
