@@ -86,7 +86,11 @@ Failed, cancelled, and interrupted runs never claim a timeline.
 Complete journal replay, cache repair, transition publication, and the full
 success artifact commit are serialized across store instances by a
 descriptor-validated per-run advisory lock. `state.json` remains a replaceable
-cache and never outranks the immutable event sequence.
+cache and never outranks the immutable event sequence. Journal enumeration,
+record reads, and immutable event publication use one pinned `events/`
+directory descriptor whose named identity is checked around publication.
+Cache publication uses the held run-directory descriptor and restores the prior
+cache, or removes a new revision-zero cache, if the event identity changes.
 
 Analysis runs outside HTTP request handling in a bounded local worker process.
 Stage 2 permits one active run per Studio project. Cancellation is cooperative

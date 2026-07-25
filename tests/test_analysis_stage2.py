@@ -790,17 +790,26 @@ def test_state_cache_repairs_from_immutable_event(
         analyzed_range=FrameRange(0, 8_000),
     )
     run = store.create_run(spec, source_id="src_" + ("a" * 32))
-    original = store._replace_state
+    original = store._replace_state_at
     calls = 0
 
-    def fail_once(path: Path, state) -> None:
+    def fail_once(
+        run_descriptor: int,
+        state,
+        *,
+        identity_guard=None,
+    ) -> None:
         nonlocal calls
         calls += 1
         if calls == 1:
             raise OSError("synthetic cache write failure")
-        original(path, state)
+        original(
+            run_descriptor,
+            state,
+            identity_guard=identity_guard,
+        )
 
-    monkeypatch.setattr(store, "_replace_state", fail_once)
+    monkeypatch.setattr(store, "_replace_state_at", fail_once)
     with pytest.raises(OSError, match="synthetic"):
         store.transition(run.id, "running")
 
@@ -997,12 +1006,12 @@ def test_state_replay_serializes_cross_instance_terminal_publication(
     snapshot_taken = threading.Event()
     release_reader = threading.Event()
     writer_waiting = threading.Event()
-    original_names = analysis_store._entry_names
+    original_names = reader._event_names
     original_flock = analysis_store.fcntl.flock
 
-    def pause_after_snapshot(path: Path, anchor) -> tuple[str, ...]:
-        names = original_names(path, anchor)
-        if threading.current_thread().name == "state-reader" and path.name == "events":
+    def pause_after_snapshot(events_descriptor: int) -> tuple[str, ...]:
+        names = original_names(events_descriptor)
+        if threading.current_thread().name == "state-reader":
             snapshot_taken.set()
             assert release_reader.wait(5)
         return names
@@ -1015,7 +1024,7 @@ def test_state_replay_serializes_cross_instance_terminal_publication(
             writer_waiting.set()
         original_flock(descriptor, operation)
 
-    monkeypatch.setattr(analysis_store, "_entry_names", pause_after_snapshot)
+    monkeypatch.setattr(reader, "_event_names", pause_after_snapshot)
     monkeypatch.setattr(analysis_store.fcntl, "flock", observe_writer_lock)
     observed: dict[str, object] = {}
 
@@ -1147,6 +1156,255 @@ def test_success_publication_is_one_cross_instance_commit(
     assert publisher.timeline_for_run(run.id) == timeline
 
 
+@pytest.mark.parametrize("terminal_status", ("failed", "cancelled", "succeeded"))
+@pytest.mark.parametrize(
+    "replacement_boundary",
+    ("event_publish", "cache_prepublish", "cache_postpublish"),
+)
+def test_event_directory_replacement_fails_before_terminal_cache_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_status: str,
+    replacement_boundary: str,
+) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AnalysisStore.initialize(tmp_path)
+    spec = AnalysisSpec.create(
+        asset_id="sha256:" + ("a" * 64),
+        timebase=Timebase(8_000, 8_000),
+        analyzed_range=FrameRange(0, 8_000),
+    )
+    run = store.create_run(spec, source_id="src_" + ("a" * 32))
+    store.transition(run.id, "running")
+    if terminal_status == "cancelled":
+        store.transition(run.id, "cancel_requested")
+    timeline = ChordCandidateTimeline.create(
+        spec_id=spec.id,
+        timebase=spec.timebase,
+        analyzed_range=spec.analyzed_range,
+        result_kind="no_candidates",
+        beats=(),
+        tempo_hypotheses=(),
+        key_hypotheses=(),
+        segments=(),
+        engine=spec.config.engine,
+    )
+    run_dir = store.runs / run.id
+    events = run_dir / "events"
+    displaced = store.tmp / f"displaced-events-{terminal_status}"
+    cached_before = (run_dir / "state.json").read_bytes()
+    original_event_publish = store._publish_event
+    original_cache_publish = store._replace_state_at
+    replaced = False
+
+    def replace_events() -> None:
+        nonlocal replaced
+        if replaced:
+            return
+        replaced = True
+        events.rename(displaced)
+        events.mkdir(mode=0o700)
+
+    def replace_before_event_publish(
+        events_descriptor: int,
+        revision: int,
+        value: dict,
+    ) -> None:
+        replace_events()
+        original_event_publish(events_descriptor, revision, value)
+
+    def replace_at_cache_publish(
+        run_descriptor: int,
+        state,
+        *,
+        identity_guard=None,
+    ) -> None:
+        if replacement_boundary == "cache_prepublish":
+            replace_events()
+        original_cache_publish(
+            run_descriptor,
+            state,
+            identity_guard=identity_guard,
+        )
+        if replacement_boundary == "cache_postpublish":
+            replace_events()
+
+    if replacement_boundary == "event_publish":
+        monkeypatch.setattr(store, "_publish_event", replace_before_event_publish)
+    else:
+        monkeypatch.setattr(store, "_replace_state_at", replace_at_cache_publish)
+
+    with pytest.raises(AnalysisError) as rejected:
+        if terminal_status == "succeeded":
+            store.publish_success(run.id, timeline)
+        else:
+            store.transition(
+                run.id,
+                terminal_status,
+                failure_code="fixture_failure" if terminal_status == "failed" else None,
+                failure_message="Synthetic failure." if terminal_status == "failed" else None,
+                retryable=terminal_status == "failed",
+            )
+
+    assert rejected.value.code == "analysis_storage_integrity"
+    assert replaced
+    assert not list(events.iterdir())
+    assert (run_dir / "state.json").read_bytes() == cached_before
+    assert any(path.name.endswith(".json") for path in displaced.iterdir())
+    if terminal_status == "succeeded":
+        assert (run_dir / "output.json").exists()
+    with pytest.raises(AnalysisError) as replay_rejected:
+        store.load_state(run.id)
+    assert replay_rejected.value.code == "analysis_storage_integrity"
+
+
+@pytest.mark.parametrize(
+    "replacement_boundary",
+    ("event_publish", "cache_prepublish", "cache_postpublish"),
+)
+def test_event_directory_replacement_fails_revision_zero_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement_boundary: str,
+) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AnalysisStore.initialize(tmp_path)
+    spec = AnalysisSpec.create(
+        asset_id="sha256:" + ("a" * 64),
+        timebase=Timebase(8_000, 8_000),
+        analyzed_range=FrameRange(0, 8_000),
+    )
+    displaced = store.tmp / "displaced-revision-zero-events"
+    original_event_publish = store._publish_event
+    original_cache_publish = store._replace_state_at
+    captured: dict[str, Path] = {}
+    replaced = False
+
+    def replace_events() -> None:
+        nonlocal replaced
+        if replaced:
+            return
+        replaced = True
+        run_dir = next(path for path in store.runs.iterdir() if path.is_dir())
+        events = run_dir / "events"
+        events.rename(displaced)
+        events.mkdir(mode=0o700)
+        captured["run_dir"] = run_dir
+
+    def replace_before_event_publish(
+        events_descriptor: int,
+        revision: int,
+        value: dict,
+    ) -> None:
+        assert revision == 0
+        replace_events()
+        original_event_publish(events_descriptor, revision, value)
+
+    def replace_at_cache_publish(
+        run_descriptor: int,
+        state,
+        *,
+        identity_guard=None,
+    ) -> None:
+        if replacement_boundary == "cache_prepublish":
+            replace_events()
+        original_cache_publish(
+            run_descriptor,
+            state,
+            identity_guard=identity_guard,
+        )
+        if replacement_boundary == "cache_postpublish":
+            replace_events()
+
+    if replacement_boundary == "event_publish":
+        monkeypatch.setattr(store, "_publish_event", replace_before_event_publish)
+    else:
+        monkeypatch.setattr(store, "_replace_state_at", replace_at_cache_publish)
+
+    with pytest.raises(AnalysisError) as rejected:
+        store.create_run(spec, source_id="src_" + ("a" * 32))
+
+    assert rejected.value.code == "analysis_storage_integrity"
+    run_dir = captured["run_dir"]
+    assert not list((run_dir / "events").iterdir())
+    assert not (run_dir / "state.json").exists()
+    assert [path.name for path in displaced.iterdir()] == ["00000000.json"]
+
+
+@pytest.mark.parametrize(
+    "replacement_boundary",
+    ("event_publish", "cache_prepublish", "cache_postpublish"),
+)
+def test_recovery_rejects_event_directory_replacement_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement_boundary: str,
+) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AnalysisStore.initialize(tmp_path)
+    spec = AnalysisSpec.create(
+        asset_id="sha256:" + ("a" * 64),
+        timebase=Timebase(8_000, 8_000),
+        analyzed_range=FrameRange(0, 8_000),
+    )
+    run = store.create_run(spec, source_id="src_" + ("a" * 32))
+    run_dir = store.runs / run.id
+    events = run_dir / "events"
+    displaced = store.tmp / "displaced-recovery-events"
+    cached_before = (run_dir / "state.json").read_bytes()
+    original_event_publish = store._publish_event
+    original_cache_publish = store._replace_state_at
+    replaced = False
+
+    def replace_events() -> None:
+        nonlocal replaced
+        if replaced:
+            return
+        replaced = True
+        events.rename(displaced)
+        events.mkdir(mode=0o700)
+
+    def replace_before_event_publish(
+        events_descriptor: int,
+        revision: int,
+        value: dict,
+    ) -> None:
+        replace_events()
+        original_event_publish(events_descriptor, revision, value)
+
+    def replace_at_cache_publish(
+        run_descriptor: int,
+        state,
+        *,
+        identity_guard=None,
+    ) -> None:
+        if replacement_boundary == "cache_prepublish":
+            replace_events()
+        original_cache_publish(
+            run_descriptor,
+            state,
+            identity_guard=identity_guard,
+        )
+        if replacement_boundary == "cache_postpublish":
+            replace_events()
+
+    if replacement_boundary == "event_publish":
+        monkeypatch.setattr(store, "_publish_event", replace_before_event_publish)
+    else:
+        monkeypatch.setattr(store, "_replace_state_at", replace_at_cache_publish)
+
+    with pytest.raises(AnalysisError) as rejected:
+        store.recover_interrupted()
+
+    assert rejected.value.code == "analysis_storage_integrity"
+    assert not list(events.iterdir())
+    assert (run_dir / "state.json").read_bytes() == cached_before
+    assert sorted(path.name for path in displaced.iterdir()) == [
+        "00000000.json",
+        "00000001.json",
+    ]
+
+
 def test_replaced_run_directory_fails_closed_without_cache_rewind(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1163,16 +1421,16 @@ def test_replaced_run_directory_fails_closed_without_cache_rewind(
     writer.transition(run.id, "running")
     replayed = threading.Event()
     release_reader = threading.Event()
-    original_names = analysis_store._entry_names
+    original_names = reader._event_names
 
-    def pause_after_replay(path: Path, anchor) -> tuple[str, ...]:
-        names = original_names(path, anchor)
-        if threading.current_thread().name == "replaced-lock-reader" and path.name == "events":
+    def pause_after_replay(events_descriptor: int) -> tuple[str, ...]:
+        names = original_names(events_descriptor)
+        if threading.current_thread().name == "replaced-lock-reader":
             replayed.set()
             assert release_reader.wait(5)
         return names
 
-    monkeypatch.setattr(analysis_store, "_entry_names", pause_after_replay)
+    monkeypatch.setattr(reader, "_event_names", pause_after_replay)
     observed: dict[str, object] = {}
 
     def read_state() -> None:

@@ -211,6 +211,32 @@ def create_text_exclusive(
         )
 
 
+def create_text_exclusive_at(
+    parent_fd: int,
+    leaf: str,
+    content: str,
+    *,
+    stage_prefix: str,
+    mode: int | None = None,
+    cleanup_reporter: CleanupReporter | None = None,
+    sync_directory: bool = False,
+) -> None:
+    """Publish one immutable text leaf relative to a caller-pinned directory."""
+
+    if not leaf or Path(leaf).name != leaf:
+        raise ValueError(f"invalid output leaf: {leaf!r}")
+    _create_text_exclusive_at(
+        parent_fd,
+        leaf,
+        content,
+        stage_prefix=stage_prefix,
+        mode=mode,
+        cleanup_reporter=cleanup_reporter,
+        sync_directory=sync_directory,
+        close_parent=False,
+    )
+
+
 def _create_text_exclusive_at(
     parent_fd: int,
     leaf: str,
@@ -314,6 +340,34 @@ def replace_text(
             close_parent=False,
             mode=mode,
         )
+
+
+def replace_text_at(
+    parent_fd: int,
+    leaf: str,
+    content: str,
+    *,
+    stage_prefix: str,
+    prepublish: Prepublish | None = None,
+    cleanup_reporter: CleanupReporter | None = None,
+    sync_directory: bool = False,
+    mode: int | None = None,
+) -> None:
+    """Atomically replace one text leaf relative to a pinned directory."""
+
+    if not leaf or Path(leaf).name != leaf:
+        raise ValueError(f"invalid output leaf: {leaf!r}")
+    _replace_text_with_parent(
+        parent_fd,
+        leaf,
+        content,
+        stage_prefix=stage_prefix,
+        prepublish=prepublish,
+        cleanup_reporter=cleanup_reporter,
+        sync_directory=sync_directory,
+        close_parent=False,
+        mode=mode,
+    )
 
 
 def _replace_text_with_parent(
