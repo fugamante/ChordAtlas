@@ -529,6 +529,12 @@ class RunState:
             raise ValueError("non-successful run cannot claim timeline")
         if self.status == "failed" and not self.failure_code:
             raise ValueError("failed run requires a failure code")
+        if self.status != "failed" and (
+            self.failure_code is not None
+            or self.failure_message is not None
+            or self.retryable
+        ):
+            raise ValueError("non-failed run cannot claim failure details")
 
     def to_record_mapping(self) -> dict[str, Any]:
         return {

@@ -153,32 +153,76 @@ class AnalysisStore:
 
     def load_state(self, run_id: str) -> RunState:
         _validate_run_id(run_id)
-        run_dir = self.runs / run_id
-        try:
-            events = [
-                run_dir / "events" / name
-                for name in _json_names(run_dir / "events", self.anchor)
-            ]
-            if not events:
+        with self._lock:
+            run_dir = self.runs / run_id
+            try:
+                latest = self._replay_states(run_id, run_dir)
+                try:
+                    cached = state_from_mapping(
+                        self._read_json(run_dir / "state.json")
+                    )
+                except (AnalysisError, KeyError, TypeError, ValueError):
+                    self._replace_state(run_dir / "state.json", latest)
+                    return latest
+                if cached != latest:
+                    self._replace_state(run_dir / "state.json", latest)
+                return latest
+            except AnalysisError:
+                raise
+            except (KeyError, TypeError, ValueError):
+                raise _integrity_error() from None
+
+    def _replay_states(self, run_id: str, run_dir: Path) -> RunState:
+        names = _entry_names(run_dir / "events", self.anchor)
+        if not names:
+            raise _integrity_error()
+        states: list[RunState] = []
+        for revision, name in enumerate(names):
+            if name != f"{revision:08d}.json":
                 raise _integrity_error()
-            latest = state_from_mapping(self._read_json(events[-1]))
+            state = state_from_mapping(
+                self._read_json(run_dir / "events" / name)
+            )
+            if state.run_id != run_id or state.revision != revision:
+                raise _integrity_error()
+            if revision == 0:
+                if state.status != "queued":
+                    raise _integrity_error()
+            elif state.status not in VALID_TRANSITIONS[states[-1].status]:
+                raise _integrity_error()
+            states.append(state)
+        latest = states[-1]
+        if latest.status == "succeeded":
+            self._validate_success_publication(run_id, latest)
+        return latest
+
+    def _validate_success_publication(
+        self,
+        run_id: str,
+        state: RunState,
+    ) -> None:
+        try:
+            if state.timeline_id is None:
+                raise _integrity_error()
+            output = self._read_json(self.runs / run_id / "output.json")
             if (
-                latest.run_id != run_id
-                or events[-1].name != f"{latest.revision:08d}.json"
+                set(output) != {"timeline_id"}
+                or output["timeline_id"] != state.timeline_id
             ):
                 raise _integrity_error()
-            try:
-                cached = state_from_mapping(self._read_json(run_dir / "state.json"))
-            except AnalysisError:
-                self._replace_state(run_dir / "state.json", latest)
-                return latest
-            if cached.run_id != run_id:
+            run = self.load_run(run_id)
+            spec = self.load_spec(run.spec_id)
+            timeline = timeline_from_mapping(
+                self._read_json(self._digest_path(self.timelines, state.timeline_id))
+            )
+            if (
+                timeline.id != state.timeline_id
+                or timeline.spec_id != run.spec_id
+                or timeline.timebase != spec.timebase
+                or timeline.analyzed_range != spec.analyzed_range
+                or timeline.engine != spec.config.engine
+            ):
                 raise _integrity_error()
-            if latest.revision < cached.revision:
-                raise _integrity_error()
-            if latest.revision > cached.revision:
-                self._replace_state(run_dir / "state.json", latest)
-            return latest
         except AnalysisError:
             raise
         except (KeyError, TypeError, ValueError):
@@ -212,6 +256,8 @@ class AnalysisStore:
                 retryable=retryable,
                 timeline_id=timeline_id,
             )
+            if state.status == "succeeded":
+                self._validate_success_publication(run_id, state)
             run_dir = self.runs / run_id
             self._publish_immutable(
                 run_dir / "events" / f"{state.revision:08d}.json",
@@ -553,10 +599,6 @@ def _entry_names(path: Path, anchor: ProjectAnchor) -> tuple[str, ...]:
             return tuple(sorted(os.listdir(descriptor)))
     except OSError:
         raise _integrity_error() from None
-
-
-def _json_names(path: Path, anchor: ProjectAnchor) -> tuple[str, ...]:
-    return tuple(name for name in _entry_names(path, anchor) if name.endswith(".json"))
 
 
 def _sync_dir(path: Path, anchor: ProjectAnchor) -> None:

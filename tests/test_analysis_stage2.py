@@ -27,7 +27,11 @@ from chordatlas.analysis import (
     analyze_pcm16_wav,
     evaluate_timeline,
 )
-from chordatlas.analysis.models import content_digest, timeline_from_mapping
+from chordatlas.analysis.models import (
+    content_digest,
+    state_from_mapping,
+    timeline_from_mapping,
+)
 from chordatlas.media import FrameRange, ProjectMediaStore, Timebase
 
 
@@ -665,14 +669,14 @@ def test_spec_and_timeline_records_require_exact_contract_and_path_identity(
     )
     store._publish_immutable(first_timeline_path, first_timeline.to_record_mapping())
     store._publish_immutable(second_timeline_path, second_timeline.to_record_mapping())
-    first_timeline_path.write_bytes(second_timeline_path.read_bytes())
     run = store.create_run(first, source_id="src_" + ("a" * 32))
     store.transition(run.id, "running")
-    store.transition(run.id, "succeeded", timeline_id=first_timeline.id)
     store._publish_immutable(
         store.runs / run.id / "output.json",
         {"timeline_id": first_timeline.id},
     )
+    store.transition(run.id, "succeeded", timeline_id=first_timeline.id)
+    first_timeline_path.write_bytes(second_timeline_path.read_bytes())
 
     with pytest.raises(AnalysisError) as timeline_rejected:
         store.timeline_for_run(run.id)
@@ -815,6 +819,279 @@ def test_malformed_state_cache_repairs_from_immutable_event(tmp_path: Path) -> N
 
     assert store.load_state(run.id).status == "queued"
     assert json.loads(state_path.read_text(encoding="utf-8"))["status"] == "queued"
+
+
+def test_invalid_state_cache_repairs_from_immutable_event(tmp_path: Path) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AnalysisStore.initialize(tmp_path)
+    spec = AnalysisSpec.create(
+        asset_id="sha256:" + ("a" * 64),
+        timebase=Timebase(8_000, 8_000),
+        analyzed_range=FrameRange(0, 8_000),
+    )
+    run = store.create_run(spec, source_id="src_" + ("a" * 32))
+    expected = store.load_state(run.id)
+    state_path = store.runs / run.id / "state.json"
+    invalid = expected.to_record_mapping()
+    invalid.pop("updated_at")
+    overwrite_private_json(state_path, invalid)
+
+    assert store.load_state(run.id) == expected
+    assert json.loads(state_path.read_text(encoding="utf-8")) == expected.to_record_mapping()
+
+
+def test_state_replay_requires_complete_canonical_event_names(tmp_path: Path) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AnalysisStore.initialize(tmp_path)
+    spec = AnalysisSpec.create(
+        asset_id="sha256:" + ("a" * 64),
+        timebase=Timebase(8_000, 8_000),
+        analyzed_range=FrameRange(0, 8_000),
+    )
+    run = store.create_run(spec, source_id="src_" + ("a" * 32))
+    store.transition(run.id, "running")
+    events = store.runs / run.id / "events"
+    (events / "00000001.json").rename(events / "00000002.json")
+
+    with pytest.raises(AnalysisError) as gap:
+        store.load_state(run.id)
+
+    (events / "00000002.json").rename(events / "00000001.json")
+    (events / "unexpected.json").write_text("{}\n", encoding="utf-8")
+    os.chmod(events / "unexpected.json", 0o600)
+
+    with pytest.raises(AnalysisError) as unexpected:
+        store.load_state(run.id)
+
+    assert gap.value.code == "analysis_storage_integrity"
+    assert unexpected.value.code == "analysis_storage_integrity"
+
+
+def test_state_replay_requires_queued_revision_zero(tmp_path: Path) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AnalysisStore.initialize(tmp_path)
+    spec = AnalysisSpec.create(
+        asset_id="sha256:" + ("a" * 64),
+        timebase=Timebase(8_000, 8_000),
+        analyzed_range=FrameRange(0, 8_000),
+    )
+    run = store.create_run(spec, source_id="src_" + ("a" * 32))
+    event = store.runs / run.id / "events" / "00000000.json"
+    value = json.loads(event.read_text(encoding="utf-8"))
+    value["status"] = "running"
+    overwrite_private_json(event, value)
+
+    with pytest.raises(AnalysisError) as rejected:
+        store.load_state(run.id)
+
+    assert rejected.value.code == "analysis_storage_integrity"
+
+
+def test_state_replay_rejects_invalid_edge_and_terminal_descendant(
+    tmp_path: Path,
+) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AnalysisStore.initialize(tmp_path)
+    spec = AnalysisSpec.create(
+        asset_id="sha256:" + ("a" * 64),
+        timebase=Timebase(8_000, 8_000),
+        analyzed_range=FrameRange(0, 8_000),
+    )
+    invalid = store.create_run(spec, source_id="src_" + ("a" * 32))
+    store.transition(invalid.id, "running")
+    invalid_event = store.runs / invalid.id / "events" / "00000001.json"
+    invalid_value = json.loads(invalid_event.read_text(encoding="utf-8"))
+    invalid_value["status"] = "queued"
+    overwrite_private_json(invalid_event, invalid_value)
+
+    with pytest.raises(AnalysisError) as invalid_edge:
+        store.load_state(invalid.id)
+
+    terminal = store.create_run(spec, source_id="src_" + ("b" * 32))
+    failed = store.transition(
+        terminal.id,
+        "failed",
+        failure_code="fixture_failure",
+        failure_message="Synthetic failure.",
+        retryable=True,
+    )
+    descendant = failed.to_record_mapping()
+    descendant.update(
+        {
+            "revision": 2,
+            "status": "running",
+            "failure_code": None,
+            "failure_message": None,
+            "retryable": False,
+        }
+    )
+    descendant_path = store.runs / terminal.id / "events" / "00000002.json"
+    overwrite_private_json(descendant_path, descendant)
+
+    with pytest.raises(AnalysisError) as terminal_descendant:
+        store.load_state(terminal.id)
+
+    assert invalid_edge.value.code == "analysis_storage_integrity"
+    assert terminal_descendant.value.code == "analysis_storage_integrity"
+
+
+def test_state_replay_detects_tampering_before_valid_tail(tmp_path: Path) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AnalysisStore.initialize(tmp_path)
+    spec = AnalysisSpec.create(
+        asset_id="sha256:" + ("a" * 64),
+        timebase=Timebase(8_000, 8_000),
+        analyzed_range=FrameRange(0, 8_000),
+    )
+    run = store.create_run(spec, source_id="src_" + ("a" * 32))
+    store.transition(run.id, "running")
+    store.transition(
+        run.id,
+        "failed",
+        failure_code="fixture_failure",
+        failure_message="Synthetic failure.",
+        retryable=True,
+    )
+    earlier = store.runs / run.id / "events" / "00000001.json"
+    value = json.loads(earlier.read_text(encoding="utf-8"))
+    value["status"] = "cancel_requested"
+    overwrite_private_json(earlier, value)
+
+    with pytest.raises(AnalysisError) as rejected:
+        store.load_state(run.id)
+
+    assert rejected.value.code == "analysis_storage_integrity"
+
+
+def test_same_revision_cache_divergence_repairs_from_journal(tmp_path: Path) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AnalysisStore.initialize(tmp_path)
+    spec = AnalysisSpec.create(
+        asset_id="sha256:" + ("a" * 64),
+        timebase=Timebase(8_000, 8_000),
+        analyzed_range=FrameRange(0, 8_000),
+    )
+    run = store.create_run(spec, source_id="src_" + ("a" * 32))
+    expected = store.transition(run.id, "running")
+    cache = store.runs / run.id / "state.json"
+    divergent = expected.to_record_mapping()
+    divergent.update(
+        {
+            "status": "failed",
+            "failure_code": "fixture_failure",
+            "failure_message": "Synthetic cache divergence.",
+            "retryable": True,
+        }
+    )
+    overwrite_private_json(cache, divergent)
+
+    assert store.load_state(run.id) == expected
+    assert json.loads(cache.read_text(encoding="utf-8")) == expected.to_record_mapping()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: value.update({"failure_code": "impossible"}),
+        lambda value: value.update({"failure_message": "impossible"}),
+        lambda value: value.update({"retryable": True}),
+    ],
+)
+def test_nonfailed_state_rejects_failure_fields(mutation) -> None:
+    value = {
+        "run_state_schema_version": "1.0.0-draft",
+        "run_id": "run_" + ("a" * 32),
+        "revision": 0,
+        "status": "queued",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+        "failure_code": None,
+        "failure_message": None,
+        "retryable": False,
+        "timeline_id": None,
+    }
+    mutation(value)
+
+    with pytest.raises(ValueError):
+        state_from_mapping(value)
+
+
+def test_succeeded_state_requires_valid_published_output(tmp_path: Path) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AnalysisStore.initialize(tmp_path)
+    spec = AnalysisSpec.create(
+        asset_id="sha256:" + ("a" * 64),
+        timebase=Timebase(8_000, 8_000),
+        analyzed_range=FrameRange(0, 8_000),
+    )
+    run = store.create_run(spec, source_id="src_" + ("a" * 32))
+    store.transition(run.id, "running")
+    timeline = ChordCandidateTimeline.create(
+        spec_id=spec.id,
+        timebase=spec.timebase,
+        analyzed_range=spec.analyzed_range,
+        result_kind="no_candidates",
+        beats=(),
+        tempo_hypotheses=(),
+        key_hypotheses=(),
+        segments=(),
+        engine=spec.config.engine,
+    )
+    store.publish_success(run.id, timeline)
+    output = store.runs / run.id / "output.json"
+    overwrite_private_json(output, {"timeline_id": "sha256:" + ("b" * 64)})
+
+    with pytest.raises(AnalysisError) as rejected:
+        store.load_state(run.id)
+
+    assert rejected.value.code == "analysis_storage_integrity"
+
+
+def test_succeeded_transition_requires_publication_before_event(tmp_path: Path) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AnalysisStore.initialize(tmp_path)
+    spec = AnalysisSpec.create(
+        asset_id="sha256:" + ("a" * 64),
+        timebase=Timebase(8_000, 8_000),
+        analyzed_range=FrameRange(0, 8_000),
+    )
+    run = store.create_run(spec, source_id="src_" + ("a" * 32))
+    store.transition(run.id, "running")
+
+    with pytest.raises(AnalysisError) as rejected:
+        store.transition(
+            run.id,
+            "succeeded",
+            timeline_id="sha256:" + ("b" * 64),
+        )
+
+    assert rejected.value.code == "analysis_storage_integrity"
+    assert store.load_state(run.id).status == "running"
+    assert not (store.runs / run.id / "events" / "00000002.json").exists()
+
+    timeline = ChordCandidateTimeline.create(
+        spec_id=spec.id,
+        timebase=spec.timebase,
+        analyzed_range=spec.analyzed_range,
+        result_kind="no_candidates",
+        beats=(),
+        tempo_hypotheses=(),
+        key_hypotheses=(),
+        segments=(),
+        engine=spec.config.engine,
+    )
+    timeline_path = store._digest_path(store.timelines, timeline.id, create=True)
+    store._publish_immutable(timeline_path, timeline.to_record_mapping())
+    store._publish_immutable(
+        store.runs / run.id / "output.json",
+        {"timeline_id": timeline.id},
+    )
+    overwrite_private_json(timeline_path, {})
+
+    with pytest.raises(AnalysisError) as malformed:
+        store.transition(run.id, "succeeded", timeline_id=timeline.id)
+
+    assert malformed.value.code == "analysis_storage_integrity"
+    assert not (store.runs / run.id / "events" / "00000002.json").exists()
 
 
 def test_publish_rejects_mismatched_engine_before_output(tmp_path: Path) -> None:
