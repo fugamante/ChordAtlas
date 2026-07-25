@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -11,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+import chordatlas.analysis.baseline as baseline
 from chordatlas.analysis import (
     AnalysisConfig,
     AnalysisError,
@@ -74,7 +76,7 @@ def spec_for(path: Path) -> tuple[AnalysisSpec, tuple[ReferenceSegment, ...]]:
     timebase, reference = write_progression(path)
     return (
         AnalysisSpec.create(
-            asset_id="sha256:" + ("a" * 64),
+            asset_id=f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}",
             timebase=timebase,
             analyzed_range=FrameRange(0, timebase.duration_frames),
             config=AnalysisConfig.baseline(),
@@ -143,6 +145,152 @@ def test_baseline_produces_reproducible_genuine_hypotheses(tmp_path: Path) -> No
     metrics = evaluate_timeline(first, reference)
     assert metrics["primary_duration_accuracy_ppm"] >= 800_000
     assert metrics["scope"] == "deterministic_synthetic_fixture_only"
+
+
+@pytest.mark.parametrize("sample", [0, 1])
+def test_baseline_emits_no_chord_for_silent_or_low_energy_pcm16(
+    tmp_path: Path,
+    sample: int,
+) -> None:
+    path = tmp_path / f"quiet-{sample}.wav"
+    sample_rate = 8_000
+    values = [sample] * (sample_rate * 2)
+    with wave.open(str(path), "wb") as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(sample_rate)
+        writer.writeframes(struct.pack(f"<{len(values)}h", *values))
+    timebase = Timebase(sample_rate, len(values))
+    spec = AnalysisSpec.create(
+        asset_id=f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}",
+        timebase=timebase,
+        analyzed_range=FrameRange(0, timebase.duration_frames),
+    )
+
+    timeline = analyze_pcm16_wav(path, spec)
+
+    assert timeline.result_kind == "candidates"
+    assert timeline.segments
+    assert all(segment.state == "no_chord" for segment in timeline.segments)
+    assert all(
+        segment.candidates[0].canonical_symbol == "N.C."
+        for segment in timeline.segments
+    )
+
+
+def test_path_baseline_rejects_media_identity_mismatch(tmp_path: Path) -> None:
+    expected_path = tmp_path / "expected.wav"
+    spec, _reference = spec_for(expected_path)
+    replacement_path = tmp_path / "replacement.wav"
+    replacement_timebase, _ = write_progression(
+        replacement_path,
+        labels=("G:maj", "G:maj", "G:maj", "G:maj"),
+    )
+    assert replacement_timebase == spec.timebase
+
+    with pytest.raises(AnalysisError) as mismatch:
+        analyze_pcm16_wav(replacement_path, spec)
+
+    assert mismatch.value.code == "media_identity_mismatch"
+    assert mismatch.value.retryable is False
+
+
+def test_path_baseline_bounds_immutable_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "source.wav"
+    spec, _reference = spec_for(path)
+    monkeypatch.setattr(baseline, "_MAX_PATH_INPUT_BYTES", len(path.read_bytes()) - 1)
+
+    with pytest.raises(AnalysisError) as oversized:
+        analyze_pcm16_wav(path, spec)
+
+    assert oversized.value.code == "media_too_large"
+    assert oversized.value.retryable is False
+
+
+def test_path_baseline_analyzes_hashed_snapshot_during_transient_substitution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "source.wav"
+    spec, _reference = spec_for(path)
+    original_bytes = path.read_bytes()
+    replacement = tmp_path / "replacement.wav"
+    write_progression(
+        replacement,
+        labels=("G:maj", "G:maj", "G:maj", "G:maj"),
+    )
+    replacement_bytes = replacement.read_bytes()
+    analyze_stream = baseline.analyze_pcm16_wav_stream
+
+    def mutate_after_decode(handle, selected, *, cancelled):
+        with path.open("r+b") as changed:
+            changed.seek(0)
+            changed.write(replacement_bytes)
+            changed.truncate()
+        try:
+            return analyze_stream(handle, selected, cancelled=cancelled)
+        finally:
+            with path.open("r+b") as restored:
+                restored.seek(0)
+                restored.write(original_bytes)
+                restored.truncate()
+
+    monkeypatch.setattr(baseline, "analyze_pcm16_wav_stream", mutate_after_decode)
+
+    timeline = analyze_pcm16_wav(path, spec)
+
+    assert [
+        segment.candidates[0].canonical_symbol for segment in timeline.segments
+    ] == ["C:maj", "G:maj", "A:min", "F:maj"]
+
+
+@pytest.mark.parametrize(
+    ("state", "label", "message"),
+    [
+        ("chord", "N.C.", "cannot contain"),
+        ("no_chord", "C:maj", "requires no-chord"),
+    ],
+)
+def test_candidate_segment_state_matches_candidate_semantics(
+    state: str,
+    label: str,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        ChordSegment(
+            0,
+            FrameRange(0, 1_000),
+            state,
+            (ChordCandidate(label, label, 1, 900_000),),
+            900_000 if state == "no_chord" else 0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("sample_rate", "duration_frames"),
+    [(16_000, 64_000), (8_000, 63_999)],
+)
+def test_path_baseline_rejects_spec_timebase_mismatch(
+    tmp_path: Path,
+    sample_rate: int,
+    duration_frames: int,
+) -> None:
+    path = tmp_path / "source.wav"
+    actual_timebase, _reference = write_progression(path)
+    spec = AnalysisSpec.create(
+        asset_id=f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}",
+        timebase=Timebase(sample_rate, duration_frames),
+        analyzed_range=FrameRange(0, min(duration_frames, actual_timebase.duration_frames)),
+    )
+
+    with pytest.raises(AnalysisError) as mismatch:
+        analyze_pcm16_wav(path, spec)
+
+    assert mismatch.value.code == "media_timebase_mismatch"
+    assert mismatch.value.retryable is False
 
 
 def test_analysis_reopens_and_verifies_exact_media_before_worker_decode(

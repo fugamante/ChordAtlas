@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import math
+import os
+import stat
 import struct
 import sys
+import tempfile
 import wave
 from array import array
 from collections.abc import Callable
@@ -21,6 +25,9 @@ from chordatlas.analysis.models import (
 from chordatlas.media.models import FrameRange
 
 MAX_ANALYSIS_SECONDS = 10 * 60
+_MAX_PATH_INPUT_BYTES = 128 * 1024 * 1024
+_SPOOL_MEMORY_BYTES = 8 * 1024 * 1024
+_NO_CHORD_RMS_FLOOR = 8
 _NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 _MAJOR_PROFILE = (636, 223, 348, 233, 438, 409, 252, 519, 239, 366, 229, 288)
 _MINOR_PROFILE = (633, 268, 352, 538, 260, 353, 254, 475, 398, 269, 334, 317)
@@ -35,11 +42,85 @@ def analyze_pcm16_wav(
     """Run the deterministic, deliberately modest baseline-v1 hypothesis engine."""
 
     try:
-        with path.open("rb") as handle:
-            return analyze_pcm16_wav_stream(handle, spec, cancelled=cancelled)
+        if (
+            spec.analyzed_range.length_frames
+            > spec.timebase.sample_rate * MAX_ANALYSIS_SECONDS
+        ):
+            raise AnalysisError(
+                "analysis_range_too_long",
+                "The baseline engine accepts at most ten minutes per run. Analyze a shorter loop.",
+            )
+        with (
+            path.open("rb") as source,
+            tempfile.SpooledTemporaryFile(
+                max_size=_SPOOL_MEMORY_BYTES,
+                mode="w+b",
+            ) as snapshot,
+        ):
+            _snapshot_path_input(source, snapshot, spec)
+            return analyze_pcm16_wav_stream(snapshot, spec, cancelled=cancelled)
     except AnalysisError:
         raise
     except OSError:
+        raise AnalysisError("decode_failed", "The authorized WAV could not be analyzed.") from None
+
+
+def _snapshot_path_input(
+    source: BinaryIO,
+    snapshot: BinaryIO,
+    spec: AnalysisSpec,
+) -> None:
+    """Copy, bind, and validate the exact bytes consumed by the path API."""
+
+    try:
+        entry = os.fstat(source.fileno())
+        if not stat.S_ISREG(entry.st_mode):
+            raise AnalysisError(
+                "unsafe_media_input",
+                "The selected WAV must be a regular file.",
+                retryable=False,
+            )
+        if entry.st_size > _MAX_PATH_INPUT_BYTES:
+            raise AnalysisError(
+                "media_too_large",
+                "The selected WAV exceeds the analysis input limit.",
+                retryable=False,
+            )
+        digest = hashlib.sha256()
+        byte_length = 0
+        while payload := source.read(1024 * 1024):
+            byte_length += len(payload)
+            if byte_length > _MAX_PATH_INPUT_BYTES:
+                raise AnalysisError(
+                    "media_too_large",
+                    "The selected WAV exceeds the analysis input limit.",
+                    retryable=False,
+                )
+            digest.update(payload)
+            snapshot.write(payload)
+        if f"sha256:{digest.hexdigest()}" != spec.asset_id:
+            raise AnalysisError(
+                "media_identity_mismatch",
+                "The selected WAV does not match the analysis specification.",
+                retryable=False,
+            )
+        snapshot.seek(0)
+        with wave.open(snapshot, "rb") as reader:
+            sample_rate = reader.getframerate()
+            duration_frames = reader.getnframes()
+        if (
+            sample_rate != spec.timebase.sample_rate
+            or duration_frames != spec.timebase.duration_frames
+        ):
+            raise AnalysisError(
+                "media_timebase_mismatch",
+                "The selected WAV timebase does not match the analysis specification.",
+                retryable=False,
+            )
+        snapshot.seek(0)
+    except AnalysisError:
+        raise
+    except (EOFError, OSError, wave.Error):
         raise AnalysisError("decode_failed", "The authorized WAV could not be analyzed.") from None
 
 
@@ -253,7 +334,12 @@ def _classify_chord(
     max_energy: int,
 ) -> tuple[str, tuple[ChordCandidate, ...], int]:
     total = sum(chroma)
-    if max_energy <= 0 or energy * 20 < max_energy or total <= 0:
+    if (
+        max_energy <= 0
+        or energy <= _NO_CHORD_RMS_FLOOR
+        or energy * 20 < max_energy
+        or total <= 0
+    ):
         candidate = ChordCandidate("N.C.", "N.C.", 1, 900_000)
         return "no_chord", (candidate,), 900_000
     scored: list[tuple[int, str]] = []

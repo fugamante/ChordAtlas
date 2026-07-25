@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -11,7 +12,12 @@ from pathlib import Path
 from typing import Any
 
 from chordatlas._fs import ProjectAnchor, TargetOccupiedError, create_text_exclusive
-from chordatlas.acquisition.models import AcquisitionError, AcquisitionRequest, utc_now
+from chordatlas.acquisition.models import (
+    AcquisitionError,
+    AcquisitionRequest,
+    DirectHttpsSource,
+    utc_now,
+)
 
 _ACTIVE = {"queued", "running", "cancel_requested"}
 _TERMINAL = {"succeeded", "failed", "cancelled"}
@@ -34,6 +40,7 @@ class AcquisitionStore:
         self.outputs_root = self.acquisitions_root / "outputs"
         self.private_root = self.root / "private" / "acquisitions"
         self.idempotency_root = self.private_root / "idempotency"
+        self.claims_root = self.private_root / "claims"
         self.tmp_root = self.root / "tmp"
 
     @classmethod
@@ -46,6 +53,7 @@ class AcquisitionStore:
             store.outputs_root,
             store.private_root,
             store.idempotency_root,
+            store.claims_root,
         ):
             _ensure_private_directory(path, store.anchor)
         _require_private_directory_anchored(store.tmp_root, store.anchor)
@@ -65,10 +73,48 @@ class AcquisitionStore:
         retry_of: str | None,
     ) -> AcquisitionRequest:
         self._verify_anchor()
+        request = self._new_request(
+            normalized_url=normalized_url,
+            display_name=display_name,
+            retry_of=retry_of,
+        )
+        self._publish_request(request, normalized_url=normalized_url)
+        return request
+
+    def create_claimed_request(
+        self,
+        *,
+        normalized_url: str,
+        display_name: str,
+        retry_of: str | None,
+    ) -> tuple[AcquisitionRequest, int]:
+        """Acquire the recovery exclusion before publishing an active request."""
+
+        self._verify_anchor()
+        request = self._new_request(
+            normalized_url=normalized_url,
+            display_name=display_name,
+            retry_of=retry_of,
+        )
+        claim = self._create_lifecycle_claim(request.id)
+        try:
+            self._publish_request(request, normalized_url=normalized_url)
+        except BaseException:
+            self.release_lifecycle_claim(request.id, claim, cleanup=True)
+            raise
+        return request, claim
+
+    def _new_request(
+        self,
+        *,
+        normalized_url: str,
+        display_name: str,
+        retry_of: str | None,
+    ) -> AcquisitionRequest:
         run_id = f"acq_{secrets.token_hex(16)}"
         source_id = f"src_{secrets.token_hex(16)}"
         timestamp = utc_now()
-        request = AcquisitionRequest(
+        return AcquisitionRequest(
             id=run_id,
             source_id=source_id,
             display_name=display_name,
@@ -78,19 +124,76 @@ class AcquisitionStore:
             created_at=timestamp,
             retry_of=retry_of,
         )
+
+    def _publish_request(
+        self,
+        request: AcquisitionRequest,
+        *,
+        normalized_url: str,
+    ) -> None:
         _publish_json_exclusive(
             self.anchor,
-            self.requests_root / f"{run_id}.json",
+            self.requests_root / f"{request.id}.json",
             request.to_record_mapping(),
         )
         _publish_json_exclusive(
             self.anchor,
-            self.private_root / f"{run_id}.json",
-            {"run_id": run_id, "private_url": normalized_url},
+            self.private_root / f"{request.id}.json",
+            {"run_id": request.id, "private_url": normalized_url},
         )
-        _ensure_private_directory(self.events_root / run_id, self.anchor)
-        self.append_event(run_id, "queued", phase="queued")
-        return request
+        _ensure_private_directory(self.events_root / request.id, self.anchor)
+        self.append_event(request.id, "queued", phase="queued")
+
+    def _create_lifecycle_claim(self, run_id: str) -> int:
+        _validate_run_id(run_id)
+        descriptor = -1
+        try:
+            with self.anchor.directory(
+                self.anchor.relative(self.claims_root)
+            ) as parent_fd:
+                descriptor = os.open(
+                    f"{run_id}.lock",
+                    os.O_CREAT | os.O_EXCL | os.O_RDWR,
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+                os.fchmod(descriptor, 0o600)
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                os.fsync(descriptor)
+                os.fsync(parent_fd)
+            return descriptor
+        except OSError:
+            if descriptor >= 0:
+                os.close(descriptor)
+            raise _integrity_error() from None
+
+    def release_lifecycle_claim(
+        self,
+        run_id: str,
+        descriptor: int,
+        *,
+        cleanup: bool,
+    ) -> None:
+        """Release one held claim; remove its name only after terminal state."""
+
+        _validate_run_id(run_id)
+        try:
+            entry = os.fstat(descriptor)
+            path = self.claims_root / f"{run_id}.lock"
+            with self.anchor.parent(path) as (parent_fd, leaf):
+                named = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(entry.st_mode)
+                or entry.st_uid != os.getuid()
+                or stat.S_IMODE(entry.st_mode) != 0o600
+                or entry.st_nlink != 1
+                or (entry.st_dev, entry.st_ino) != (named.st_dev, named.st_ino)
+            ):
+                raise _integrity_error()
+        finally:
+            os.close(descriptor)
+        if cleanup:
+            _unlink_private(path, self.anchor)
 
     def claim_idempotency(self, key: str, fingerprint: str, run_id: str) -> str:
         self._verify_anchor()
@@ -112,7 +215,13 @@ class AcquisitionStore:
         if _path_exists(path, self.anchor):
             existing = _read_json(path, self.anchor)
             return self._validated_idempotency(existing, digest, fingerprint)
-        self.load_request(run_id)
+        request = self.load_request(run_id)
+        if fingerprint != idempotency_fingerprint(
+            url_fingerprint=request.url_fingerprint,
+            display_name=request.display_name,
+            retry_of=request.retry_of,
+        ):
+            raise _integrity_error()
         try:
             _publish_json_exclusive(self.anchor, path, value)
             return run_id
@@ -153,7 +262,13 @@ class AcquisitionStore:
             raise _integrity_error()
         existing_run = str(value["run_id"])
         _validate_run_id(existing_run)
-        self.load_request(existing_run)
+        request = self.load_request(existing_run)
+        if value["request_fingerprint"] != idempotency_fingerprint(
+            url_fingerprint=request.url_fingerprint,
+            display_name=request.display_name,
+            retry_of=request.retry_of,
+        ):
+            raise _integrity_error()
         if value["request_fingerprint"] != fingerprint:
             raise AcquisitionError(
                 "idempotency_conflict",
@@ -186,9 +301,25 @@ class AcquisitionStore:
             )
         try:
             value = _read_json(path, self.anchor)
-            if value["run_id"] != run_id:
+            if (
+                set(value) != {"run_id", "private_url"}
+                or value.get("run_id") != run_id
+                or not isinstance(value.get("private_url"), str)
+            ):
                 raise _integrity_error()
-            return str(value["private_url"])
+            source = DirectHttpsSource.classify(value["private_url"])
+            request = self.load_request(run_id)
+            if (
+                source.url != value["private_url"]
+                or hashlib.sha256(source.url.encode()).hexdigest()
+                != request.url_fingerprint
+            ):
+                raise _integrity_error()
+            return source.url
+        except AcquisitionError as error:
+            if error.code == "acquisition_storage_integrity":
+                raise
+            raise _integrity_error() from None
         except (KeyError, TypeError, ValueError):
             raise _integrity_error() from None
 
@@ -198,9 +329,7 @@ class AcquisitionStore:
         path = self.private_root / f"{run_id}.json"
         if not _path_exists(path, self.anchor):
             return
-        value = _read_json(path, self.anchor)
-        if value.get("run_id") != run_id:
-            raise _integrity_error()
+        self.private_url(run_id)
         _unlink_private(path, self.anchor)
 
     def append_event(
@@ -395,12 +524,22 @@ class AcquisitionStore:
     def recover_interrupted(self, recover_output=None) -> list[str]:
         self._verify_anchor()
         recovered: list[str] = []
+        orphan_stages, live_runs = _orphan_upload_stages(self.tmp_root, self.anchor)
+        orphan_claims, claimed_runs = _lifecycle_claims(
+            self.claims_root,
+            self.anchor,
+        )
+        live_runs.update(claimed_runs)
         for name in _json_names(self.requests_root, self.anchor):
             if not name.startswith("acq_"):
                 continue
             run_id = Path(name).stem
             state = self.status(run_id)
-            if state is not None and state["status"] in _ACTIVE:
+            if (
+                state is not None
+                and state["status"] in _ACTIVE
+                and run_id not in live_runs
+            ):
                 output = recover_output(run_id) if recover_output is not None else None
                 if output is not None:
                     self.publish_output(
@@ -424,6 +563,28 @@ class AcquisitionStore:
                         retryable=True,
                     )
                 recovered.append(run_id)
+        for run_id, path in orphan_claims:
+            try:
+                state = self.status(run_id)
+            except AcquisitionError as error:
+                if error.code == "unknown_acquisition":
+                    continue
+                raise
+            if state is not None and state["status"] in _TERMINAL:
+                _unlink_private(path, self.anchor)
+        for run_id, path in orphan_stages:
+            try:
+                state = self.status(run_id)
+            except AcquisitionError as error:
+                if error.code == "unknown_acquisition":
+                    continue
+                raise
+            if state is None or state["status"] in _ACTIVE:
+                continue
+            try:
+                _unlink_private(path, self.anchor)
+            except AcquisitionError:
+                raise _integrity_error()
         for name in _entry_names(self.tmp_root, self.anchor):
             if not name.startswith(".acquisition-") or not name.endswith(".tmp"):
                 continue
@@ -433,6 +594,19 @@ class AcquisitionStore:
             except AcquisitionError:
                 raise _integrity_error()
         return recovered
+
+
+def idempotency_fingerprint(
+    *,
+    url_fingerprint: str,
+    display_name: str,
+    retry_of: str | None,
+) -> str:
+    """Bind an idempotent operation to every immutable request input."""
+
+    return hashlib.sha256(
+        f"{url_fingerprint}\0{display_name}\0{retry_of or ''}".encode()
+    ).hexdigest()
 
 
 def _validate_run_id(value: str) -> None:
@@ -541,13 +715,12 @@ def _read_json(path: Path, anchor: ProjectAnchor) -> dict[str, Any]:
                     time.sleep(0.001)
                     continue
                 raise _integrity_error()
-            with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
-                descriptor = -1
-                value = json.load(
-                    handle,
-                    object_pairs_hook=_reject_duplicate_keys,
-                    parse_constant=_reject_constant,
-                )
+            payload = _read_stable_descriptor(descriptor, entry)
+            value = json.loads(
+                payload,
+                object_pairs_hook=_reject_duplicate_keys,
+                parse_constant=_reject_constant,
+            )
             break
         except (OSError, UnicodeError, ValueError):
             raise _integrity_error() from None
@@ -557,6 +730,139 @@ def _read_json(path: Path, anchor: ProjectAnchor) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise _integrity_error()
     return value
+
+
+def _read_stable_descriptor(descriptor: int, before: os.stat_result) -> bytes:
+    payload = bytearray()
+    while len(payload) <= _MAX_RECORD_BYTES:
+        chunk = os.read(
+            descriptor,
+            min(64 * 1024, _MAX_RECORD_BYTES + 1 - len(payload)),
+        )
+        if not chunk:
+            break
+        payload.extend(chunk)
+    after = os.fstat(descriptor)
+    if (
+        len(payload) > _MAX_RECORD_BYTES
+        or len(payload) != before.st_size
+        or (after.st_dev, after.st_ino, after.st_size)
+        != (before.st_dev, before.st_ino, before.st_size)
+    ):
+        raise _integrity_error()
+    return bytes(payload)
+
+
+def _orphan_upload_stages(
+    tmp_root: Path,
+    anchor: ProjectAnchor,
+) -> tuple[list[tuple[str, Path]], set[str]]:
+    orphans: list[tuple[str, Path]] = []
+    live_runs: set[str] = set()
+    for name in _entry_names(tmp_root, anchor):
+        run_id = _upload_stage_owner(name)
+        if run_id is None:
+            continue
+        path = tmp_root / name
+        descriptor = -1
+        try:
+            with anchor.parent(path) as (parent_fd, leaf):
+                descriptor = os.open(
+                    leaf,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_fd,
+                )
+                named = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+            entry = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(entry.st_mode)
+                or entry.st_uid != os.getuid()
+                or stat.S_IMODE(entry.st_mode) != 0o600
+                or entry.st_nlink != 1
+                or (entry.st_dev, entry.st_ino) != (named.st_dev, named.st_ino)
+            ):
+                raise _integrity_error()
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                live_runs.add(run_id)
+            else:
+                orphans.append((run_id, path))
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        except AcquisitionError:
+            raise
+        except OSError:
+            raise _integrity_error() from None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+    return orphans, live_runs
+
+
+def _lifecycle_claims(
+    claims_root: Path,
+    anchor: ProjectAnchor,
+) -> tuple[list[tuple[str, Path]], set[str]]:
+    orphans: list[tuple[str, Path]] = []
+    live_runs: set[str] = set()
+    for name in _entry_names(claims_root, anchor):
+        if not name.endswith(".lock"):
+            raise _integrity_error()
+        run_id = name.removesuffix(".lock")
+        if not re_full_acquisition(run_id):
+            raise _integrity_error()
+        path = claims_root / name
+        descriptor = -1
+        try:
+            with anchor.parent(path) as (parent_fd, leaf):
+                descriptor = os.open(
+                    leaf,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_fd,
+                )
+                named = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+            entry = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(entry.st_mode)
+                or entry.st_uid != os.getuid()
+                or stat.S_IMODE(entry.st_mode) != 0o600
+                or entry.st_nlink != 1
+                or entry.st_size != 0
+                or (entry.st_dev, entry.st_ino) != (named.st_dev, named.st_ino)
+            ):
+                raise _integrity_error()
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                live_runs.add(run_id)
+            else:
+                orphans.append((run_id, path))
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        except AcquisitionError:
+            raise
+        except OSError:
+            raise _integrity_error() from None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+    return orphans, live_runs
+
+
+def _upload_stage_owner(name: str) -> str | None:
+    prefix = ".upload-"
+    suffix = ".tmp"
+    if not name.startswith(prefix) or not name.endswith(suffix):
+        return None
+    body = name[len(prefix) : -len(suffix)]
+    try:
+        run_id, token = body.rsplit("-", 1)
+    except ValueError:
+        return None
+    if not re_full_acquisition(run_id) or len(token) != 16 or any(
+        character not in "0123456789abcdef" for character in token
+    ):
+        return None
+    return run_id
 
 
 def _path_exists(path: Path, anchor: ProjectAnchor) -> bool:

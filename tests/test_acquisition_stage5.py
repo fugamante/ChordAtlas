@@ -24,7 +24,7 @@ from chordatlas.acquisition import (
     DownloadResult,
     PinnedHttpsTransport,
 )
-from chordatlas.acquisition.store import AcquisitionStore
+from chordatlas.acquisition.store import AcquisitionStore, idempotency_fingerprint
 from chordatlas.media import ProjectMediaStore, RemoteLocator
 
 
@@ -497,7 +497,11 @@ def test_idempotency_record_tampering_fails_closed(
         retry_of=None,
     )
     key = "tamper-request"
-    fingerprint = "a" * 64
+    fingerprint = idempotency_fingerprint(
+        url_fingerprint=request.url_fingerprint,
+        display_name=request.display_name,
+        retry_of=request.retry_of,
+    )
     assert store.claim_idempotency(key, fingerprint, request.id) == request.id
     digest = hashlib.sha256(key.encode()).hexdigest()
     path = store.idempotency_root / f"{digest}.json"
@@ -946,8 +950,8 @@ def test_acquisition_never_writes_through_replaced_stage_ancestor(
     external = tmp_path / "external-acquisition-stage"
     external.mkdir(mode=0o700)
 
-    def allocate_then_replace() -> Path:
-        stage = original_allocate()
+    def allocate_then_replace(*, owner_run_id=None) -> Path:
+        stage = original_allocate(owner_run_id=owner_run_id)
         service.media.tmp_root.rename(tmp_path / "original-acquisition-stage")
         service.media.tmp_root.symlink_to(external, target_is_directory=True)
         return stage
@@ -1132,3 +1136,290 @@ def test_acquisition_rejects_event_filename_generation_mismatch(
         store.status(request.id)
 
     assert integrity.value.code == "acquisition_storage_integrity"
+
+
+def test_acquisition_json_reader_rejects_concurrent_growth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store_module = importlib.import_module("chordatlas.acquisition.store")
+    ProjectMediaStore.initialize(tmp_path)
+    store = AcquisitionStore.initialize(tmp_path)
+    request = store.create_request(
+        normalized_url="https://audio.example/take",
+        display_name="take.wav",
+        retry_of=None,
+    )
+    event = store.events_root / request.id / "00000000.json"
+    original_read = store_module.os.read
+    grew = False
+
+    def grow_after_first_read(descriptor: int, size: int) -> bytes:
+        nonlocal grew
+        payload = original_read(descriptor, size)
+        if not grew:
+            grew = True
+            with event.open("ab") as handle:
+                handle.write(b" ")
+                handle.flush()
+                os.fsync(handle.fileno())
+        return payload
+
+    monkeypatch.setattr(store_module.os, "read", grow_after_first_read)
+
+    with pytest.raises(AcquisitionError) as rejected:
+        store.status(request.id)
+
+    assert rejected.value.code == "acquisition_storage_integrity"
+
+
+@pytest.mark.parametrize("mutation", ("duplicate", "nonfinite"))
+def test_acquisition_json_reader_rejects_ambiguous_values(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AcquisitionStore.initialize(tmp_path)
+    request = store.create_request(
+        normalized_url="https://audio.example/take",
+        display_name="take.wav",
+        retry_of=None,
+    )
+    event = store.events_root / request.id / "00000000.json"
+    payload = event.read_text(encoding="utf-8")
+    if mutation == "duplicate":
+        payload = payload.replace(
+            '"run_id": ',
+            f'"run_id": "{request.id}",\n  "run_id": ',
+            1,
+        )
+    else:
+        payload = payload.replace('"bytes_received": 0', '"bytes_received": NaN', 1)
+    event.write_text(payload, encoding="utf-8")
+    os.chmod(event, 0o600)
+
+    with pytest.raises(AcquisitionError) as rejected:
+        store.status(request.id)
+
+    assert rejected.value.code == "acquisition_storage_integrity"
+
+
+def test_idempotency_record_rejects_existing_unrelated_run(tmp_path: Path) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AcquisitionStore.initialize(tmp_path)
+    first = store.create_request(
+        normalized_url="https://audio.example/first",
+        display_name="first.wav",
+        retry_of=None,
+    )
+    second = store.create_request(
+        normalized_url="https://audio.example/second",
+        display_name="second.wav",
+        retry_of=None,
+    )
+    key = "bound-request"
+    fingerprint = idempotency_fingerprint(
+        url_fingerprint=first.url_fingerprint,
+        display_name=first.display_name,
+        retry_of=first.retry_of,
+    )
+    store.claim_idempotency(key, fingerprint, first.id)
+    digest = hashlib.sha256(key.encode()).hexdigest()
+    record = store.idempotency_root / f"{digest}.json"
+    value = json.loads(record.read_text(encoding="utf-8"))
+    value["run_id"] = second.id
+    record.write_text(json.dumps(value), encoding="utf-8")
+    os.chmod(record, 0o600)
+
+    with pytest.raises(AcquisitionError) as rejected:
+        store.lookup_idempotency(key, fingerprint)
+
+    assert rejected.value.code == "acquisition_storage_integrity"
+
+
+@pytest.mark.parametrize("mutation", ("extra", "retarget", "unnormalized"))
+def test_private_locator_is_exactly_bound_to_request(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    ProjectMediaStore.initialize(tmp_path)
+    store = AcquisitionStore.initialize(tmp_path)
+    request = store.create_request(
+        normalized_url="https://audio.example/take",
+        display_name="take.wav",
+        retry_of=None,
+    )
+    path = store.private_root / f"{request.id}.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if mutation == "extra":
+        value["unexpected"] = True
+    elif mutation == "retarget":
+        value["private_url"] = "https://other.example/take"
+    else:
+        value["private_url"] = "https://AUDIO.example/take"
+    path.write_text(json.dumps(value), encoding="utf-8")
+    os.chmod(path, 0o600)
+
+    with pytest.raises(AcquisitionError) as rejected:
+        store.private_url(request.id)
+
+    assert rejected.value.code == "acquisition_storage_integrity"
+
+
+def test_recovery_removes_only_owned_orphan_upload_stage(tmp_path: Path) -> None:
+    media = ProjectMediaStore.initialize(tmp_path)
+    store = AcquisitionStore.initialize(tmp_path)
+    request = store.create_request(
+        normalized_url="https://audio.example/take",
+        display_name="take.wav",
+        retry_of=None,
+    )
+    orphan = media.allocate_private_stage(owner_run_id=request.id)
+    orphan.write_bytes(b"private recording bytes")
+    generic = media.allocate_private_stage()
+    generic.write_bytes(b"unrelated live upload")
+
+    assert store.recover_interrupted() == [request.id]
+
+    assert not orphan.exists()
+    assert generic.read_bytes() == b"unrelated live upload"
+    assert store.status(request.id)["failure_code"] == "acquisition_interrupted"
+
+
+def test_recovery_preserves_locked_live_acquisition_stage(tmp_path: Path) -> None:
+    media = ProjectMediaStore.initialize(tmp_path)
+    store = AcquisitionStore.initialize(tmp_path)
+    request = store.create_request(
+        normalized_url="https://audio.example/take",
+        display_name="take.wav",
+        retry_of=None,
+    )
+    stage = media.allocate_private_stage(owner_run_id=request.id)
+
+    with media.open_private_stage(stage, writable=True):
+        assert store.recover_interrupted() == []
+        assert stage.exists()
+        assert store.status(request.id)["status"] == "queued"
+
+    assert store.recover_interrupted() == [request.id]
+    assert not stage.exists()
+
+
+def test_recovery_rejects_retargeted_owned_stage(tmp_path: Path) -> None:
+    media = ProjectMediaStore.initialize(tmp_path)
+    store = AcquisitionStore.initialize(tmp_path)
+    request = store.create_request(
+        normalized_url="https://audio.example/take",
+        display_name="take.wav",
+        retry_of=None,
+    )
+    stage = media.allocate_private_stage(owner_run_id=request.id)
+    outside = tmp_path / "outside-private.wav"
+    outside.write_bytes(b"must remain")
+    stage.unlink()
+    stage.symlink_to(outside)
+
+    with pytest.raises(AcquisitionError) as rejected:
+        store.recover_interrupted()
+
+    assert rejected.value.code == "acquisition_storage_integrity"
+    assert outside.read_bytes() == b"must remain"
+
+
+def test_recovery_cannot_terminalize_claimed_run_before_stage_allocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AcquisitionService(tmp_path, transport=FakeTransport())
+    entered = threading.Event()
+    release = threading.Event()
+    original_allocate = service.media.allocate_private_stage
+
+    def blocked_allocate(*, owner_run_id=None):
+        entered.set()
+        assert release.wait(5)
+        return original_allocate(owner_run_id=owner_run_id)
+
+    monkeypatch.setattr(service.media, "allocate_private_stage", blocked_allocate)
+    run_id = service.start(
+        url="https://audio.example/take",
+        display_name="take.wav",
+        authorization_confirmed=True,
+    )
+    assert entered.wait(5)
+
+    second_store = AcquisitionStore.initialize(tmp_path)
+    assert second_store.recover_interrupted() == []
+    assert second_store.status(run_id)["status"] == "queued"
+
+    release.set()
+    assert service.wait(run_id, 5)["status"] == "succeeded"
+    assert list(service.store.claims_root.iterdir()) == []
+
+
+def test_recovery_preserves_stage_with_unknown_owner_identity(tmp_path: Path) -> None:
+    media = ProjectMediaStore.initialize(tmp_path)
+    store = AcquisitionStore.initialize(tmp_path)
+    unknown_run = "acq_" + ("f" * 32)
+    stage = media.allocate_private_stage(owner_run_id=unknown_run)
+    stage.write_bytes(b"ownership cannot be proven")
+
+    assert store.recover_interrupted() == []
+    assert stage.read_bytes() == b"ownership cannot be proven"
+
+
+def test_idempotency_race_terminalizes_unowned_claimed_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = AcquisitionService(tmp_path, transport=FakeTransport())
+    second = AcquisitionService(tmp_path, transport=FakeTransport())
+    precheck = threading.Barrier(2)
+
+    def stale_precheck(_key: str, _fingerprint: str) -> None:
+        precheck.wait()
+        return None
+
+    monkeypatch.setattr(first, "_existing_idempotency", stale_precheck)
+    monkeypatch.setattr(second, "_existing_idempotency", stale_precheck)
+
+    def submit(service: AcquisitionService, url: str) -> tuple[str, str]:
+        try:
+            return (
+                "started",
+                service.start(
+                    url=url,
+                    display_name="take.wav",
+                    authorization_confirmed=True,
+                    idempotency_key="racing-request",
+                ),
+            )
+        except AcquisitionError as error:
+            return ("rejected", error.code)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(
+                lambda item: submit(*item),
+                (
+                    (first, "https://first.example/take"),
+                    (second, "https://second.example/take"),
+                ),
+            )
+        )
+
+    assert sorted(status for status, _value in results) == ["rejected", "started"]
+    assert next(value for status, value in results if status == "rejected") == (
+        "idempotency_conflict"
+    )
+    winner_index = next(
+        index for index, (status, _value) in enumerate(results) if status == "started"
+    )
+    winner = results[winner_index][1]
+    assert (first, second)[winner_index].wait(winner, 5)["status"] == "succeeded"
+
+    states = AcquisitionStore.initialize(tmp_path).list()
+    assert sorted(state["status"] for state in states) == ["failed", "succeeded"]
+    loser = next(state for state in states if state["status"] == "failed")
+    assert loser["failure_code"] == "idempotency_conflict"
+    assert list(first.store.claims_root.iterdir()) == []

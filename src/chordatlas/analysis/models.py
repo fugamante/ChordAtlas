@@ -12,7 +12,7 @@ from chordatlas.media.models import FrameRange, Timebase
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _RUN_RE = re.compile(r"^run_[0-9a-f]{32}$")
 _SOURCE_RE = re.compile(r"^src_[0-9a-f]{32}$")
-_SYMBOL_RE = re.compile(r"^[A-G](?:#|b)?(?::(?:maj|min))?$|^N\\.C\\.$")
+_SYMBOL_RE = re.compile(r"^[A-G](?:#|b)?(?::(?:maj|min))?$|^N\.C\.$")
 
 
 class AnalysisError(ValueError):
@@ -254,6 +254,18 @@ class ChordSegment:
             raise ValueError("candidate ranks must be unique and contiguous")
         if self.state == "chord" and not self.candidates:
             raise ValueError("chord segment requires candidates")
+        if self.state == "chord" and any(
+            candidate.canonical_symbol == "N.C." for candidate in self.candidates
+        ):
+            raise ValueError("chord segment cannot contain a no-chord candidate")
+        if self.state == "no_chord" and (
+            not self.candidates
+            or any(
+                candidate.canonical_symbol != "N.C."
+                for candidate in self.candidates
+            )
+        ):
+            raise ValueError("no-chord segment requires no-chord candidates")
         if not 0 <= self.no_chord_probability_ppm <= 1_000_000:
             raise ValueError("no-chord probability is invalid")
 

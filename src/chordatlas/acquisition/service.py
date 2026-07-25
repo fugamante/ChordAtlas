@@ -11,7 +11,7 @@ from chordatlas.acquisition.models import (
     AcquisitionError,
     DirectHttpsSource,
 )
-from chordatlas.acquisition.store import AcquisitionStore
+from chordatlas.acquisition.store import AcquisitionStore, idempotency_fingerprint
 from chordatlas.acquisition.transport import (
     DEFAULT_MAX_DOWNLOAD_BYTES,
     AcquisitionTransport,
@@ -24,6 +24,7 @@ from chordatlas.media import MediaImportError, ProjectMediaStore, RemoteLocator
 class _Job:
     run_id: str
     cancel: threading.Event
+    claim: int
     thread: threading.Thread | None = None
 
 
@@ -83,57 +84,70 @@ class AcquisitionService:
                     "acquisition_busy",
                     "Another acquisition is active. Wait, cancel it, or retry later.",
                 )
-            fingerprint = hashlib.sha256(
-                f"{source.url}\0{safe_name}\0{retry_of or ''}".encode()
-            ).hexdigest()
-            if idempotency_key is not None:
-                existing = self._existing_idempotency(idempotency_key, fingerprint)
-                if existing is not None:
-                    return existing
-            request = self.store.create_request(
-                normalized_url=source.url,
+            url_fingerprint = hashlib.sha256(source.url.encode()).hexdigest()
+            fingerprint = idempotency_fingerprint(
+                url_fingerprint=url_fingerprint,
                 display_name=safe_name,
                 retry_of=retry_of,
             )
             if idempotency_key is not None:
-                claimed = self.store.claim_idempotency(
-                    idempotency_key,
-                    fingerprint,
-                    request.id,
-                )
-                if claimed != request.id:
-                    self.store.append_event(
-                        request.id,
-                        "failed",
-                        phase="failed",
-                        failure_code="idempotency_superseded",
-                        failure_message="An identical acquisition request already exists.",
-                        retryable=False,
-                    )
-                    return claimed
-            job = _Job(request.id, threading.Event())
-            thread = threading.Thread(
-                target=self._supervise,
-                args=(job, source),
-                name=f"acquisition-{request.id}",
-                daemon=False,
+                existing = self._existing_idempotency(idempotency_key, fingerprint)
+                if existing is not None:
+                    return existing
+            request, claim = self.store.create_claimed_request(
+                normalized_url=source.url,
+                display_name=safe_name,
+                retry_of=retry_of,
             )
+            try:
+                if idempotency_key is not None:
+                    claimed = self.store.claim_idempotency(
+                        idempotency_key,
+                        fingerprint,
+                        request.id,
+                    )
+                    if claimed != request.id:
+                        self.store.append_event(
+                            request.id,
+                            "failed",
+                            phase="failed",
+                            failure_code="idempotency_superseded",
+                            failure_message="An identical acquisition request already exists.",
+                            retryable=False,
+                        )
+                        self.store.release_lifecycle_claim(
+                            request.id,
+                            claim,
+                            cleanup=True,
+                        )
+                        return claimed
+                job = _Job(request.id, threading.Event(), claim)
+                thread = threading.Thread(
+                    target=self._supervise,
+                    args=(job, source),
+                    name=f"acquisition-{request.id}",
+                    daemon=False,
+                )
+            except BaseException as error:
+                self._terminalize_unowned_request(request.id, claim, error)
+                raise
             job.thread = thread
             self._jobs[request.id] = job
             try:
                 thread.start()
-            except Exception:
-                self.store.append_event(
+            except Exception as error:
+                self._terminalize_unowned_request(
                     request.id,
-                    "failed",
-                    phase="failed",
-                    failure_code="supervisor_start_failed",
-                    failure_message="The acquisition supervisor could not start. Retry it.",
+                    claim,
+                    AcquisitionError(
+                        "supervisor_start_failed",
+                        "The acquisition supervisor could not start. Retry it.",
+                    ),
                 )
                 raise AcquisitionError(
                     "supervisor_start_failed",
                     "The acquisition supervisor could not start. Retry it.",
-                ) from None
+                ) from error
             return request.id
 
     def status(self, run_id: str) -> dict:
@@ -226,11 +240,47 @@ class AcquisitionService:
     def _existing_idempotency(self, key: str, fingerprint: str) -> str | None:
         return self.store.lookup_idempotency(key, fingerprint)
 
+    def _terminalize_unowned_request(
+        self,
+        run_id: str,
+        claim: int,
+        error: BaseException,
+    ) -> None:
+        """Fail and unlock a durable request that no worker accepted."""
+
+        failure = (
+            error
+            if isinstance(error, AcquisitionError)
+            else AcquisitionError(
+                "acquisition_setup_failed",
+                "The acquisition could not start safely. Retry it.",
+            )
+        )
+        cleanup = False
+        try:
+            state = self.status(run_id)
+            if state["status"] not in {"succeeded", "failed", "cancelled"}:
+                self.store.append_event(
+                    run_id,
+                    "failed",
+                    phase="failed",
+                    failure_code=failure.code,
+                    failure_message=failure.public_message,
+                    retryable=failure.retryable,
+                )
+            cleanup = True
+        finally:
+            self.store.release_lifecycle_claim(
+                run_id,
+                claim,
+                cleanup=cleanup,
+            )
+
     def _supervise(self, job: _Job, source: DirectHttpsSource) -> None:
         stage_path: Path | None = None
         stage_handle = None
         try:
-            stage_path = self.media.allocate_private_stage()
+            stage_path = self.media.allocate_private_stage(owner_run_id=job.run_id)
             stage_handle = self.media.open_private_stage(stage_path, writable=True)
             if job.cancel.is_set():
                 if self.status(job.run_id)["status"] == "queued":
@@ -342,6 +392,19 @@ class AcquisitionService:
                         "acquisition_cleanup",
                         "Acquisition staging failed to close safely. Retry it.",
                     ),
+                )
+            cleanup_claim = False
+            try:
+                cleanup_claim = self.status(job.run_id)["status"] in {
+                    "succeeded",
+                    "failed",
+                    "cancelled",
+                }
+            finally:
+                self.store.release_lifecycle_claim(
+                    job.run_id,
+                    job.claim,
+                    cleanup=cleanup_claim,
                 )
 
     def _fail(self, job: _Job, error: AcquisitionError | MediaImportError) -> None:

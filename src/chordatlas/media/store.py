@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -187,11 +188,11 @@ class ProjectMediaStore:
                 stage_handle.close()
             self.discard_private_stage(stage_path)
 
-    def allocate_private_stage(self) -> Path:
+    def allocate_private_stage(self, *, owner_run_id: str | None = None) -> Path:
         """Allocate a private project stage for a supervised ingestion adapter."""
 
         self._require_anchor()
-        return self._allocate_stage()
+        return self._allocate_stage(owner_run_id=owner_run_id)
 
     def open_private_stage(self, stage_path: Path, *, writable: bool) -> BinaryIO:
         """Pin one private staging file so writers cannot follow path replacement."""
@@ -227,6 +228,10 @@ class ProjectMediaStore:
                 or (entry.st_dev, entry.st_ino) != (named.st_dev, named.st_ino)
             ):
                 raise _integrity_error()
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise _integrity_error() from None
             handle = os.fdopen(descriptor, "r+b" if writable else "rb")
             descriptor = -1
             return handle
@@ -619,11 +624,21 @@ class ProjectMediaStore:
             return False
         return True
 
-    def _allocate_stage(self) -> Path:
+    def _allocate_stage(self, *, owner_run_id: str | None = None) -> Path:
         anchor = self._required_anchor()
+        if owner_run_id is not None and (
+            len(owner_run_id) != 36
+            or not owner_run_id.startswith("acq_")
+            or any(
+                character not in "0123456789abcdef"
+                for character in owner_run_id[4:]
+            )
+        ):
+            raise _integrity_error()
         with anchor.directory(anchor.relative(self.tmp_root)) as parent_fd:
             for _ in range(16):
-                leaf = f".upload-{secrets.token_hex(8)}.tmp"
+                owner = "" if owner_run_id is None else f"{owner_run_id}-"
+                leaf = f".upload-{owner}{secrets.token_hex(8)}.tmp"
                 try:
                     descriptor = os.open(
                         leaf,
@@ -955,11 +970,14 @@ class ProjectMediaStore:
                         time.sleep(0.001)
                         continue
                     raise _integrity_error()
-                with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
-                    descriptor = -1
-                    value = json.load(handle)
+                payload = self._read_stable_descriptor(descriptor, entry)
+                value = json.loads(
+                    payload,
+                    object_pairs_hook=_reject_duplicate_keys,
+                    parse_constant=_reject_constant,
+                )
                 break
-            except (OSError, UnicodeError, json.JSONDecodeError):
+            except (OSError, UnicodeError, ValueError):
                 raise _integrity_error() from None
             finally:
                 if descriptor >= 0:
@@ -967,6 +985,30 @@ class ProjectMediaStore:
         if not isinstance(value, dict):
             raise _integrity_error()
         return value
+
+    def _read_stable_descriptor(
+        self,
+        descriptor: int,
+        before: os.stat_result,
+    ) -> bytes:
+        payload = bytearray()
+        while len(payload) <= _MAX_RECORD_BYTES:
+            chunk = os.read(
+                descriptor,
+                min(64 * 1024, _MAX_RECORD_BYTES + 1 - len(payload)),
+            )
+            if not chunk:
+                break
+            payload.extend(chunk)
+        after = os.fstat(descriptor)
+        if (
+            len(payload) > _MAX_RECORD_BYTES
+            or len(payload) != before.st_size
+            or (after.st_dev, after.st_ino, after.st_size)
+            != (before.st_dev, before.st_ino, before.st_size)
+        ):
+            raise _integrity_error()
+        return bytes(payload)
 
     def _read_text(self, path: Path) -> str:
         anchor = self._required_anchor()
@@ -1054,6 +1096,19 @@ def _safe_display_name(value: str) -> str:
     if not leaf:
         leaf = "audio.wav"
     return leaf[:160]
+
+
+def _reject_duplicate_keys(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON key")
+        value[key] = item
+    return value
+
+
+def _reject_constant(value: str):
+    raise ValueError(f"invalid JSON constant: {value}")
 
 
 def _require_stage_identity(

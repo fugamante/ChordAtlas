@@ -602,3 +602,55 @@ def test_playback_clamps_seek_and_stops_at_duration() -> None:
 
     assert state.position_frame == 100
     assert not state.playing
+
+
+def test_media_json_reader_rejects_concurrent_growth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ProjectMediaStore.initialize(tmp_path)
+    source, _asset = import_wav(store, synthetic_wav())
+    record = store.sources_root / f"{source.id}.json"
+    original_read = media_store_module.os.read
+    grew = False
+
+    def grow_after_first_read(descriptor: int, size: int) -> bytes:
+        nonlocal grew
+        payload = original_read(descriptor, size)
+        if not grew:
+            grew = True
+            with record.open("ab") as handle:
+                handle.write(b" ")
+                handle.flush()
+                os.fsync(handle.fileno())
+        return payload
+
+    monkeypatch.setattr(media_store_module.os, "read", grow_after_first_read)
+
+    with pytest.raises(MediaImportError) as rejected:
+        store._read_json(record)
+
+    assert rejected.value.code == "storage_integrity"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        b'{"source_id":"src_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",'
+        b'"source_id":"src_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}',
+        b'{"value":NaN}',
+    ),
+)
+def test_media_json_reader_rejects_ambiguous_values(
+    tmp_path: Path,
+    payload: bytes,
+) -> None:
+    store = ProjectMediaStore.initialize(tmp_path)
+    record = store.sources_root / ("src_" + ("a" * 32) + ".json")
+    record.write_bytes(payload)
+    os.chmod(record, 0o600)
+
+    with pytest.raises(MediaImportError) as rejected:
+        store._read_json(record)
+
+    assert rejected.value.code == "storage_integrity"
