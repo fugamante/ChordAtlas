@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from chordatlas._fs import replace_text_batch
 from chordatlas.models import SongChart
 
 SCHEMA_PACKAGE = "chordatlas.schemas"
@@ -73,6 +74,31 @@ class SchemaMirrorResult:
 def validate_chart_schema(chart: SongChart) -> SchemaValidationResult:
     """Validate a chart's normalized JSON export when schema tooling is available."""
 
+    mapping = chart.to_mapping()
+    try:
+        if _has_non_string_json_key(mapping):
+            return SchemaValidationResult(
+                status="failed",
+                errors=("<root>: normalized chart JSON object keys must be strings",),
+            )
+        serialized = json.dumps(mapping, sort_keys=True, allow_nan=False)
+        instance = json.loads(serialized)
+    except TypeError:
+        return SchemaValidationResult(
+            status="failed",
+            errors=("<root>: normalized chart contains a value that is not JSON serializable",),
+        )
+    except ValueError:
+        return SchemaValidationResult(
+            status="failed",
+            errors=("<root>: normalized chart is not strict JSON",),
+        )
+    except RecursionError:
+        return SchemaValidationResult(
+            status="failed",
+            errors=("<root>: normalized chart exceeds JSON nesting limits",),
+        )
+
     try:
         jsonschema = importlib.import_module("jsonschema")
         referencing = importlib.import_module("referencing")
@@ -97,18 +123,46 @@ def validate_chart_schema(chart: SongChart) -> SchemaValidationResult:
     validator = jsonschema.Draft202012Validator(song_schema, registry=registry)
     errors = tuple(
         _format_error(error)
-        for error in sorted(validator.iter_errors(chart.to_mapping()), key=str)
+        for error in sorted(validator.iter_errors(instance), key=str)
     )
     if errors:
         return SchemaValidationResult(status="failed", errors=errors)
     return SchemaValidationResult(status="passed")
 
 
+def _has_non_string_json_key(value: Any, active: set[int] | None = None) -> bool:
+    """Return whether a JSON-shaped value contains an object key that is not text."""
+
+    if not isinstance(value, (dict, list, tuple)):
+        return False
+
+    if active is None:
+        active = set()
+    identity = id(value)
+    if identity in active:
+        return False
+
+    active.add(identity)
+    try:
+        if isinstance(value, dict):
+            if any(not isinstance(key, str) for key in value):
+                return True
+            children = value.values()
+        else:
+            children = value
+        return any(_has_non_string_json_key(child, active) for child in children)
+    finally:
+        active.remove(identity)
+
+
 def check_schema_mirror(mirror_dir: Path | None = None) -> SchemaMirrorResult:
     """Check whether the source-tree schema mirror matches packaged schemas."""
 
     target = _mirror_dir(mirror_dir)
-    drift = tuple(name for name in SCHEMA_NAMES if _mirror_text(target, name) != _schema_text(name))
+    canonical = _canonical_schema_texts()
+    drift = tuple(
+        name for name in SCHEMA_NAMES if _mirror_text(target, name) != canonical[name]
+    )
     status = "dirty" if drift else "clean"
     return SchemaMirrorResult(status=status, mirror_dir=target, drift=drift)
 
@@ -117,10 +171,16 @@ def sync_schema_mirror(mirror_dir: Path | None = None) -> SchemaMirrorResult:
     """Copy canonical packaged schemas into the source-tree mirror."""
 
     target = _mirror_dir(mirror_dir)
-    before = check_schema_mirror(target).drift
+    canonical = _canonical_schema_texts()
+    before = tuple(
+        name for name in SCHEMA_NAMES if _mirror_text(target, name) != canonical[name]
+    )
     target.mkdir(parents=True, exist_ok=True)
-    for name in SCHEMA_NAMES:
-        (target / name).write_text(_schema_text(name), encoding="utf-8")
+    replace_text_batch(
+        target,
+        ((name, canonical[name]) for name in SCHEMA_NAMES),
+        stage_prefix=".chordatlas-schema-",
+    )
     return SchemaMirrorResult(status="synced", mirror_dir=target, drift=before)
 
 
@@ -154,6 +214,10 @@ def _schema_text(name: str) -> str:
     return importlib.resources.files(SCHEMA_PACKAGE).joinpath(name).read_text(encoding="utf-8")
 
 
+def _canonical_schema_texts() -> dict[str, str]:
+    return {name: _schema_text(name) for name in SCHEMA_NAMES}
+
+
 def _mirror_dir(mirror_dir: Path | None) -> Path:
     if mirror_dir is not None:
         return mirror_dir
@@ -165,9 +229,14 @@ def _mirror_dir(mirror_dir: Path | None) -> Path:
 
 def _mirror_text(mirror_dir: Path, name: str) -> str | None:
     path = mirror_dir / name
+    if path.is_symlink():
+        return None
     if not path.exists():
         return None
-    return path.read_text(encoding="utf-8")
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeError:
+        return None
 
 
 def _read_json(path: Any) -> dict[str, Any]:

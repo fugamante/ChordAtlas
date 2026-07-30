@@ -1,0 +1,16 @@
+{
+  "fixture_policy": "generated-in-test-only",
+  "fixtures": [
+    {
+      "generator": "tests/test_practice_stage6.py::approved_fixture",
+      "license": "MIT",
+      "purpose": "Deterministic approved-chart practice mapping, persistence, and privacy"
+    }
+  ],
+  "review": {
+    "contains_copyrighted_lyrics": false,
+    "contains_third_party_recording": false,
+    "performs_live_network_request": false,
+    "redistribution_authorized": true
+  }
+}

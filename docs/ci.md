@@ -1,39 +1,47 @@
 # CI Integration
 
-This page documents the repository's snapshot drift reporting workflow and the
-portable pattern used by `.github/workflows/ci.yml`.
-
-## Snapshot JSON
-
-Use JSON output when CI needs structured snapshot status:
+The checked-in GitHub Actions workflow is intentionally aligned with the local
+pre-release gate. CI installs the project with development dependencies, checks
+the schema mirror explicitly, then runs the same release validation command used
+by maintainers.
 
 ```bash
-chordchart snapshots check --format json --diff-dir snapshot-diffs > snapshot-result.json
+python -m pip install -e ".[dev]"
+chordchart schemas --check
+chordchart release-check
+chordchart validate examples/open-string-progression.yaml
+chordchart render examples/open-string-progression.yaml --format json | python -m json.tool >/tmp/chordatlas-example.json
 ```
 
-Exit codes are unchanged:
+## GitHub Actions Policy
 
-- `0`: snapshots are in sync.
-- `1`: snapshot drift was detected.
-- `2`: the command was invalid, such as an unknown target.
+The workflow preserves the repository action-version policy:
 
-The JSON payload includes:
+- Third-party actions are pinned to full commit SHAs.
+- Version comments document the reviewed upstream version beside each SHA.
+- The workflow uses `permissions: contents: read`.
 
-- `status`: `clean` or `dirty`
-- `target`: requested snapshot target
-- `checked_files`: all checked snapshot files
-- `drift_files`: snapshot files with drift
-- `diffs`: per-file diff metadata
-- `diffs[].truncated`: whether inline text-mode diff output would be capped
-- `diffs[].diff_artifact`: full `.diff` path when `--diff-dir` is used
+Current workflow steps:
 
-## GitHub Actions
+1. Check out the repository.
+2. Set up Python 3.11 with pip caching.
+3. Install the project with `.[dev]`.
+4. Run `chordchart schemas --check`.
+5. Run `chordchart release-check`.
+6. Verify the installed CLI by validating and rendering the example chart.
+7. Re-run snapshot verification with machine-readable diagnostics and diff
+   artifacts.
+8. Upload any snapshot diff artifacts.
 
-This example keeps snapshot checking separate from `pytest` so CI can emit clear
-annotations and upload full diff artifacts. The explicit status condition lets
-snapshot generation run after an earlier test failure, provided installation
-succeeded, while still skipping diagnostics when installation fails or the
-workflow is cancelled.
+`release-check` is the single authoritative CI gate. It runs schema mirror
+validation, snapshot verification, Python compilation, full `pytest`, and
+temporary wheel/sdist build inspection.
+
+The workflow repeats snapshot checking after the release gate so CI can emit
+clear annotations and upload full diff artifacts. The explicit status condition
+lets snapshot diagnostics run after an earlier release-check failure, provided
+installation succeeded, while still skipping diagnostics when installation
+fails or the workflow is cancelled.
 
 ```yaml
 - name: Install project
@@ -133,8 +141,35 @@ rerun the already-published `v0.1.0` release to test this workflow.
 CI can check only one snapshot family when a job is scoped:
 
 ```bash
-chordchart snapshots check open-string --format json
-chordchart snapshots check research-comparison --format json --diff-dir snapshot-diffs
+chordchart snapshots check research-comparison --format json
+chordchart snapshots check research-comparison --diff-dir snapshot-diffs
+chordchart snapshots regenerate research-comparison
 ```
 
-Use `chordchart snapshots list` to enumerate supported targets.
+Available snapshot targets are `open-string` and `research-comparison`.
+Omitting the target checks or regenerates all snapshot families.
+
+## Local Parity
+
+Before opening or updating a pull request, run:
+
+```bash
+chordchart schemas --check
+chordchart release-check
+chordchart validate examples/open-string-progression.yaml
+chordchart render examples/open-string-progression.yaml --format json | python -m json.tool >/tmp/chordatlas-example.json
+```
+
+CI should fail for the same reasons as the local release gate. If CI fails,
+reproduce locally with the commands above before changing the workflow.
+
+## Snapshot Diagnostics
+
+Snapshot checks remain available for targeted local debugging:
+
+```bash
+chordchart snapshots check --format json --diff-dir snapshot-diffs
+```
+
+The release gate already checks all registered snapshot families. Use targeted
+snapshot commands when you need focused diffs, not as a separate CI substitute.

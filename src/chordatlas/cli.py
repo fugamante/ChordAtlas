@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import io
+import os
 import sys
 from pathlib import Path
 
+from chordatlas._fs import (
+    PublishedCleanupError,
+    TargetOccupiedError,
+    create_text_exclusive,
+    replace_text,
+)
 from chordatlas.compare import (
     ComparisonFilters,
     comparison_metadata_to_json,
@@ -23,7 +31,109 @@ from chordatlas.snapshots import (
 )
 
 
+class _ParserExit(SystemExit):
+    pass
+
+
+class _ManagedStderr:
+    def __init__(self, stream) -> None:
+        self._stream = stream
+        self.failed = False
+
+    def write(self, content: str) -> int:
+        if self.failed:
+            return len(content)
+        try:
+            return self._stream.write(content)
+        except OSError:
+            self._fail()
+            return len(content)
+
+    def flush(self) -> None:
+        if self.failed:
+            return
+        try:
+            self._stream.flush()
+        except OSError:
+            self._fail()
+
+    def _fail(self) -> None:
+        self.failed = True
+        devnull_fd: int | None = None
+        try:
+            stderr_fd = self._stream.fileno()
+        except (AttributeError, OSError, ValueError):
+            stderr_fd = None
+
+        if stderr_fd == 2:
+            try:
+                devnull_fd = os.open(os.devnull, os.O_WRONLY)
+                if devnull_fd != stderr_fd:
+                    os.dup2(devnull_fd, stderr_fd)
+                    os.close(devnull_fd)
+                return
+            except OSError:
+                if devnull_fd is not None and devnull_fd != stderr_fd:
+                    try:
+                        os.close(devnull_fd)
+                    except OSError:
+                        pass
+
+        try:
+            self._stream = open(os.devnull, "w", encoding="utf-8")
+        except OSError:
+            pass
+
+    def __getattr__(self, name: str):
+        return getattr(self._stream, name)
+
+
+class _CliParser(argparse.ArgumentParser):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._stdout_failed = False
+
+    def _print_message(self, message: str, file=None) -> None:
+        if message and file is sys.stdout:
+            self._stdout_failed = _write_stdout(message) != 0
+            return
+        super()._print_message(message, file)
+
+    def exit(self, status: int = 0, message: str | None = None) -> None:
+        if message:
+            self._print_message(message, sys.stderr)
+        if status == 0 and self._stdout_failed:
+            status = 1
+        raise _ParserExit(status)
+
+
 def main(argv: list[str] | None = None) -> int:
+    original_stderr = sys.stderr
+    managed_stderr = _ManagedStderr(original_stderr)
+    sys.stderr = managed_stderr
+    try:
+        try:
+            result = _main(argv)
+        except _ParserExit as error:
+            managed_stderr.flush()
+            if managed_stderr.failed:
+                raise _ParserExit(1) from None
+            raise
+        except BaseException:
+            try:
+                managed_stderr.flush()
+            except BaseException:
+                pass
+            raise
+
+        managed_stderr.flush()
+        return 1 if managed_stderr.failed else result
+    finally:
+        if not managed_stderr.failed:
+            sys.stderr = original_stderr
+
+
+def _main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -56,14 +166,14 @@ def main(argv: list[str] | None = None) -> int:
             output_format=args.format,
         )
     if args.command == "release-check":
-        return run_release_check()
+        return run_release_check(stderr=sys.stderr)
 
     parser.print_help()
     return 1
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="chordchart", description="Render structured guitar charts.")
+    parser = _CliParser(prog="chordchart", description="Render structured guitar charts.")
     subcommands = parser.add_subparsers(dest="command")
 
     new_parser = subcommands.add_parser("new", help="Create a starter song YAML file.")
@@ -182,13 +292,91 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _new_chart(path: Path, *, force: bool) -> int:
-    if path.exists() and not force:
-        print(f"Refusing to overwrite existing file: {path}", file=sys.stderr)
-        return 2
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(example_song_yaml(), encoding="utf-8")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if force:
+                _write_new_chart_atomic(path)
+            else:
+                _write_new_chart_exclusive(path)
+        except TargetOccupiedError:
+            print(f"Refusing to overwrite existing file: {path}", file=sys.stderr)
+            return 2
+        except PublishedCleanupError as error:
+            print(
+                f"Chart created, but temporary cleanup failed: {error}",
+                file=sys.stderr,
+            )
+            return 1
+    except OSError as error:
+        print(f"Unable to create chart: {error}", file=sys.stderr)
+        return 1
     print(f"Created {path}", file=sys.stderr)
     return 0
+
+
+def _write_new_chart_exclusive(path: Path) -> None:
+    create_text_exclusive(
+        path,
+        example_song_yaml(),
+        stage_prefix=".chordatlas-new-",
+        cleanup_reporter=_report_cleanup_failure,
+    )
+
+
+def _write_new_chart_atomic(path: Path) -> None:
+    replace_text(
+        path,
+        example_song_yaml(),
+        stage_prefix=".chordatlas-new-",
+        cleanup_reporter=_report_cleanup_failure,
+    )
+
+
+class _MetadataAliasesInput(Exception):
+    pass
+
+
+def _report_cleanup_failure(error: BaseException, cleanup_error: OSError) -> None:
+    message = f"Temporary cleanup failed: {cleanup_error}"
+    print(message, file=sys.stderr)
+    error.add_note(message)
+
+
+def _write_stdout(content: str) -> int:
+    try:
+        sys.stdout.write(content)
+        sys.stdout.flush()
+    except BrokenPipeError:
+        _neutralize_broken_stdout()
+        return 1
+    except OSError as error:
+        print(f"Unable to write output: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _neutralize_broken_stdout() -> None:
+    stdout_fd: int | None = None
+    devnull_fd: int | None = None
+    try:
+        stdout_fd = sys.stdout.fileno()
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        if devnull_fd != stdout_fd:
+            os.dup2(devnull_fd, stdout_fd)
+            os.close(devnull_fd)
+        return
+    except (AttributeError, OSError, ValueError):
+        if devnull_fd is not None and devnull_fd != stdout_fd:
+            try:
+                os.close(devnull_fd)
+            except OSError:
+                pass
+
+    try:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _render_chart(path: Path, *, output_format: str, provenance_mode: str) -> int:
@@ -199,15 +387,15 @@ def _render_chart(path: Path, *, output_format: str, provenance_mode: str) -> in
         return 1
 
     if output_format == "md":
-        print(render_markdown(chart, provenance_mode=provenance_mode), end="")
+        content = render_markdown(chart, provenance_mode=provenance_mode)
     elif output_format == "txt":
-        print(render_text(chart, provenance_mode=provenance_mode), end="")
+        content = render_text(chart, provenance_mode=provenance_mode)
     elif output_format == "json":
-        print(song_chart_to_json(chart), end="")
+        content = song_chart_to_json(chart)
     else:
         print(f"Unsupported format: {output_format}", file=sys.stderr)
         return 2
-    return 0
+    return _write_stdout(content)
 
 
 def _compare_chart(
@@ -233,62 +421,116 @@ def _compare_chart(
                 print("--metadata-json requires --provenance research", file=sys.stderr)
                 return 2
             try:
-                metadata_json.parent.mkdir(parents=True, exist_ok=True)
-                metadata_json.write_text(
-                    comparison_metadata_to_json(
-                        chart,
-                        filters=filters,
-                        provenance_mode="research",
-                    ),
-                    encoding="utf-8",
+                metadata_content = comparison_metadata_to_json(
+                    chart,
+                    filters=filters,
+                    provenance_mode="research",
                 )
+            except OSError as error:
+                print(f"Unable to write metadata JSON: {error}", file=sys.stderr)
+                return 1
+            try:
+                if _same_existing_file(path, metadata_json):
+                    print(
+                        "--metadata-json must not overwrite the input chart",
+                        file=sys.stderr,
+                    )
+                    return 2
+            except (OSError, RuntimeError) as error:
+                print(f"Unable to inspect metadata JSON path: {error}", file=sys.stderr)
+                return 1
+            try:
+                metadata_json.parent.mkdir(parents=True, exist_ok=True)
+                _write_metadata_json_atomic(
+                    path,
+                    metadata_json,
+                    metadata_content,
+                )
+            except _MetadataAliasesInput:
+                print(
+                    "--metadata-json must not overwrite the input chart",
+                    file=sys.stderr,
+                )
+                return 2
+            except PublishedCleanupError as error:
+                print(
+                    f"Metadata JSON written, but temporary cleanup failed: {error}",
+                    file=sys.stderr,
+                )
+                return 1
             except OSError as error:
                 print(f"Unable to write metadata JSON: {error}", file=sys.stderr)
                 return 1
 
         if output_format == "json":
-            print(
-                comparison_to_json(
-                    chart,
-                    filters=filters,
-                    provenance_mode=provenance_mode,
-                ),
-                end="",
+            content = comparison_to_json(
+                chart,
+                filters=filters,
+                provenance_mode=provenance_mode,
             )
         elif output_format == "md":
-            print(
-                render_comparison_markdown(
-                    chart,
-                    filters=filters,
-                    provenance_mode=provenance_mode,
-                ),
-                end="",
+            content = render_comparison_markdown(
+                chart,
+                filters=filters,
+                provenance_mode=provenance_mode,
             )
         elif output_format == "txt":
-            print(
-                render_comparison_text(
-                    chart,
-                    filters=filters,
-                    provenance_mode=provenance_mode,
-                ),
-                end="",
+            content = render_comparison_text(
+                chart,
+                filters=filters,
+                provenance_mode=provenance_mode,
             )
         elif output_format == "csv":
-            print(
-                comparison_to_csv(
-                    chart,
-                    filters=filters,
-                    provenance_mode=provenance_mode,
-                ),
-                end="",
+            content = comparison_to_csv(
+                chart,
+                filters=filters,
+                provenance_mode=provenance_mode,
             )
         else:
             print(f"Unsupported format: {output_format}", file=sys.stderr)
             return 2
+        return _write_stdout(content)
     except ValueError as error:
         print(f"Invalid comparison filter: {error}", file=sys.stderr)
         return 1
-    return 0
+
+
+def _write_metadata_json_atomic(input_path: Path, output_path: Path, content: str) -> None:
+    def reject_input_alias(parent_fd: int, leaf: str) -> None:
+        try:
+            input_stat = os.stat(input_path)
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                f"input chart disappeared before metadata publication: {input_path}"
+            ) from None
+        try:
+            output_stat = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=True)
+        except FileNotFoundError:
+            return
+        if os.path.samestat(input_stat, output_stat):
+            raise _MetadataAliasesInput
+
+    replace_text(
+        output_path,
+        content,
+        stage_prefix=".chordatlas-metadata-",
+        prepublish=reject_input_alias,
+        cleanup_reporter=_report_cleanup_failure,
+    )
+
+
+def _same_existing_file(first: Path, second: Path) -> bool:
+    resolved_first = first.resolve(strict=False)
+    resolved_second = second.resolve(strict=False)
+    if resolved_first == resolved_second:
+        return True
+    try:
+        return first.samefile(second)
+    except FileNotFoundError:
+        try:
+            return resolved_first.samefile(resolved_second)
+        except FileNotFoundError:
+            return False
 
 
 def _validate_chart(path: Path) -> int:
@@ -326,14 +568,33 @@ def _validate_chart(path: Path) -> int:
 
 def _schemas(sync: bool) -> int:
     if sync:
-        result = sync_schema_mirror()
+        try:
+            result = sync_schema_mirror()
+        except PublishedCleanupError as error:
+            print(
+                f"Schema mirror synced, but temporary cleanup failed: {error}",
+                file=sys.stderr,
+            )
+            return 1
+        except (OSError, ValueError) as error:
+            print(
+                f"Schema mirror sync failed; mirror may be partially updated: {error}",
+                file=sys.stderr,
+            )
+            for note in getattr(error, "__notes__", ()):
+                print(note, file=sys.stderr)
+            return 1
         print(f"Synced schema mirror: {result.mirror_dir}", file=sys.stderr)
         if result.drift:
             for name in result.drift:
                 print(f"- updated {name}", file=sys.stderr)
         return 0
 
-    result = check_schema_mirror()
+    try:
+        result = check_schema_mirror()
+    except (OSError, ValueError) as error:
+        print(f"Schema mirror check failed: {error}", file=sys.stderr)
+        return 1
     if result.clean:
         print(f"Schema mirror is in sync: {result.mirror_dir}", file=sys.stderr)
         return 0
@@ -353,17 +614,22 @@ def _snapshots(
     output_format: str,
 ) -> int:
     if action == "list":
-        for name in available_snapshot_targets():
-            print(name)
-        return 0
+        content = "".join(f"{name}\n" for name in available_snapshot_targets())
+        return _write_stdout(content)
     if action == "check":
-        return run_snapshot_check(
+        stdout = io.StringIO() if output_format == "json" else sys.stdout
+        result = run_snapshot_check(
             target=target,
             diff_dir=diff_dir,
             output_format=output_format,
-            stdout=sys.stdout,
+            stdout=stdout,
             stderr=sys.stderr,
         )
+        if output_format == "json":
+            payload = stdout.getvalue()
+            if payload and _write_stdout(payload) != 0:
+                return 1
+        return result
     if action == "regenerate":
         return run_snapshot_regenerate(target=target, stderr=sys.stderr)
     print(f"Unsupported snapshot action: {action}", file=sys.stderr)

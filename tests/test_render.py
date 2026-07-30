@@ -219,6 +219,63 @@ def test_recording_scopes_render_with_semantics_in_standard_mode() -> None:
     assert "- Light chorus [Studio recording] (inferred, Medium confidence)" in rendered
 
 
+def test_duplicate_recording_titles_use_ids_in_all_chart_attribution() -> None:
+    chart = SongChart.from_mapping(
+        {
+            "title": "Test",
+            "recordings": {"studio": "Reference", "live": "Reference"},
+            "structured_recording_notes": {
+                "Effects": {
+                    "category": "effects",
+                    "recording_ids": ["studio", "live"],
+                    "notes": [
+                        {"text": "Chorus", "recording_id": "studio"},
+                        {"text": "Dry", "recording_id": "live"},
+                    ],
+                }
+            },
+        }
+    )
+
+    markdown = render_markdown(chart)
+    text = render_text(chart)
+
+    for rendered in (markdown, text):
+        assert "Effects [Reference [studio], Reference [live]]" in rendered
+        assert "Chorus [Reference [studio]]" in rendered
+        assert "Dry [Reference [live]]" in rendered
+        assert "Reference [studio]: 1 claims" in rendered
+        assert "Reference [live]: 1 claims" in rendered
+
+
+def test_colliding_category_labels_use_raw_keys_in_chart_comparison() -> None:
+    chart = SongChart.from_mapping(
+        {
+            "title": "Test",
+            "recordings": {"studio": "Studio"},
+            "structured_recording_notes": [
+                {
+                    "name": "Underscore",
+                    "category": "source_quality",
+                    "notes": [{"text": "Clear", "recording_id": "studio"}],
+                },
+                {
+                    "name": "Space",
+                    "category": "source quality",
+                    "notes": [{"text": "Noisy", "recording_id": "studio"}],
+                },
+            ],
+        }
+    )
+
+    markdown = render_markdown(chart)
+    text = render_text(chart)
+
+    for rendered in (markdown, text):
+        assert "Source Quality [source_quality]" in rendered
+        assert "Source Quality [source quality]" in rendered
+
+
 def test_recording_source_comparison_groups_claims_and_differences() -> None:
     chart = SongChart.from_mapping(
         {

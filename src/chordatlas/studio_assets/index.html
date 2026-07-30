@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ChordAtlas Studio</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div>
+      <p class="eyebrow">Local transcription workspace</p>
+      <h1>ChordAtlas Studio</h1>
+      <p class="lede">Import authorized PCM WAV audio, inspect its waveform, and
+        audition frame-addressed ranges without sending media off this device.</p>
+    </div>
+    <button id="shutdown" class="quiet" type="button">Stop Studio</button>
+  </header>
+
+  <main>
+    <section class="panel import-panel" aria-labelledby="import-title">
+      <div class="section-heading">
+        <div>
+          <p class="step">01 / Import</p>
+          <h2 id="import-title">Choose local audio</h2>
+        </div>
+        <span class="format-badge">PCM16 WAV · mono/stereo</span>
+      </div>
+
+      <label class="file-field" for="audio-file">
+        <span>Audio file</span>
+        <input id="audio-file" type="file" accept=".wav,audio/wav">
+      </label>
+
+      <label class="authorization">
+        <input id="authorization" type="checkbox">
+        <span>I confirm that I own this recording or have permission or another
+          right to process it.</span>
+      </label>
+      <p class="legal-note">This acknowledgement records your workflow assertion;
+        it is not a legal determination.</p>
+
+      <button id="import" class="primary" type="button" disabled>Import local WAV</button>
+
+      <fieldset class="remote-source">
+        <legend>Direct HTTPS WAV</legend>
+        <p id="remote-help" class="legal-note">A direct media URL returns the WAV
+          bytes themselves. A webpage that plays or describes audio is not a
+          direct media URL. No request occurs before authorization is recorded.</p>
+        <label for="remote-name">Safe display name
+          <input id="remote-name" type="text" maxlength="160"
+            autocomplete="off" aria-describedby="remote-help">
+        </label>
+        <label for="remote-url">Private direct-media URL
+          <input id="remote-url" type="password" inputmode="url"
+            autocomplete="off" autocapitalize="off" spellcheck="false"
+            aria-describedby="remote-help">
+        </label>
+        <button id="toggle-remote-url" class="quiet" type="button"
+          aria-controls="remote-url" aria-pressed="false">Show URL</button>
+        <label class="authorization">
+          <input id="remote-authorization" type="checkbox">
+          <span>I confirm this direct URL identifies a recording I own or am
+            authorized to retrieve and process, and accept one private
+            project-local copy.</span>
+        </label>
+        <button id="acquire" class="primary" type="button" disabled>Acquire WAV</button>
+        <progress id="acquisition-progress" aria-label="Remote acquisition progress"
+          hidden></progress>
+        <p id="acquisition-status" class="status" role="status"
+          aria-live="polite" tabindex="-1">No remote acquisition started.</p>
+        <div class="acquisition-actions">
+          <button id="cancel-acquisition" class="quiet" type="button" hidden>
+            Cancel acquisition
+          </button>
+          <button id="retry-acquisition" class="quiet" type="button" hidden>
+            Retry acquisition
+          </button>
+          <button id="forget-acquisition" class="quiet" type="button" hidden>
+            Forget private locator
+          </button>
+        </div>
+        <details id="acquisition-details" hidden>
+          <summary>Safe attempt details</summary>
+          <dl id="acquisition-metadata" class="analysis-metadata"></dl>
+        </details>
+      </fieldset>
+      <p id="status" class="status" role="status" aria-live="polite">Connecting to the local service…</p>
+    </section>
+
+    <section class="panel workspace" aria-labelledby="workspace-title">
+      <div class="section-heading">
+        <div>
+          <p class="step">02 / Listen</p>
+          <h2 id="workspace-title">Waveform workspace</h2>
+        </div>
+        <label class="source-picker" for="source-select">
+          <span>Imported source</span>
+          <select id="source-select" disabled>
+            <option value="">No imported audio</option>
+          </select>
+        </label>
+      </div>
+
+      <dl id="metadata" class="metadata" aria-label="Audio metadata">
+        <div><dt>Format</dt><dd>—</dd></div>
+        <div><dt>Sample rate</dt><dd>—</dd></div>
+        <div><dt>Channels</dt><dd>—</dd></div>
+        <div><dt>Frames</dt><dd>—</dd></div>
+      </dl>
+
+      <div class="waveform-shell">
+        <canvas id="waveform"
+          aria-label="No waveform loaded. Import a WAV file to begin."></canvas>
+        <div id="cursor" class="cursor" aria-hidden="true"></div>
+        <p class="waveform-help">Click to seek or drag to select a loop range.
+          Use the Position control for keyboard seeking.</p>
+      </div>
+
+      <audio id="audio" preload="metadata"></audio>
+
+      <div class="transport" aria-label="Playback controls">
+        <button id="play" class="transport-button" type="button" disabled>Play</button>
+        <button id="pause" class="transport-button" type="button" disabled>Pause</button>
+        <label class="seek-control" for="seek">
+          <span>Position</span>
+          <input id="seek" type="range" min="0" max="1" value="0" disabled>
+        </label>
+        <output id="position" for="seek">0 frames · 00:00.000</output>
+      </div>
+
+      <fieldset class="loop-controls" disabled>
+        <legend>Frame-addressed loop</legend>
+        <label for="loop-start">Start frame
+          <input id="loop-start" type="number" min="0" value="0">
+        </label>
+        <label for="loop-end">End frame
+          <input id="loop-end" type="number" min="1" value="1">
+        </label>
+        <button id="set-loop" type="button">Set loop</button>
+        <button id="clear-loop" class="quiet" type="button">Clear loop</button>
+        <span id="loop-state" aria-live="polite">Loop off</span>
+      </fieldset>
+
+      <section class="analysis-panel" aria-labelledby="analysis-title">
+        <div class="analysis-heading">
+          <div>
+            <p class="step">03 / Analyze</p>
+            <h2 id="analysis-title">Machine draft</h2>
+          </div>
+          <span class="draft-badge">Unreviewed</span>
+        </div>
+        <p class="analysis-caveat">The baseline engine proposes major/minor chords,
+          tempo, beats, and key. It is a reference hypothesis engine, not musical truth.</p>
+        <div class="analysis-controls">
+          <label for="analysis-scope">Analysis scope
+            <select id="analysis-scope" disabled>
+              <option value="entire">Entire recording</option>
+              <option value="loop">Current loop</option>
+            </select>
+          </label>
+          <button id="analyze" class="primary" type="button" disabled>Analyze chords</button>
+          <button id="cancel-analysis" class="quiet" type="button" hidden>Cancel analysis</button>
+          <button id="retry-analysis" class="quiet" type="button" hidden>Retry as new run</button>
+          <label for="analysis-run">Saved run
+            <select id="analysis-run" disabled>
+              <option value="">No analysis runs</option>
+            </select>
+          </label>
+        </div>
+        <progress id="analysis-progress" hidden>Analysis running</progress>
+        <p id="analysis-status" class="status" role="status" aria-live="polite">
+          Import or select audio to analyze.
+        </p>
+        <details id="analysis-details">
+          <summary>Run details</summary>
+          <dl id="analysis-metadata" class="analysis-metadata"></dl>
+        </details>
+        <div id="analysis-summary" class="analysis-summary" hidden></div>
+        <ol id="candidate-lane" class="candidate-lane"
+          aria-label="Read-only machine chord proposals"></ol>
+      </section>
+
+      <section class="review-panel" aria-labelledby="review-title">
+        <div class="analysis-heading">
+          <div>
+            <p class="step">04 / Review</p>
+            <h2 id="review-title">Editable review</h2>
+          </div>
+          <span id="review-phase" class="review-badge">Not started</span>
+        </div>
+        <p class="analysis-caveat">The machine lane above stays immutable and
+          visibly unreviewed. Changes below are private, replayable review
+          revisions and do not create or modify a SongChart.</p>
+        <div class="review-controls">
+          <button id="start-review" class="primary" type="button" disabled>Start review</button>
+          <label for="review-session">Saved review
+            <select id="review-session" disabled>
+              <option value="">No review sessions</option>
+            </select>
+          </label>
+          <button id="undo-review" type="button" disabled>Undo</button>
+          <button id="redo-review" type="button" disabled>Redo</button>
+          <button id="reset-review" class="quiet" type="button" disabled>Reset to raw</button>
+          <button id="accept-boundaries" type="button" disabled>Accept unchanged boundaries</button>
+          <button id="finish-review" type="button" disabled>Finish review</button>
+        </div>
+        <p id="review-status" class="status" role="status" aria-live="polite">
+          Complete a local analysis to start a durable review.
+        </p>
+        <div id="review-conflict-actions" class="conflict-actions" hidden>
+          <button id="retry-review-edit" type="button">Retry rejected edit</button>
+          <button id="discard-review-edit" class="quiet" type="button">Discard rejected edit</button>
+        </div>
+        <p id="finish-reason" class="review-guidance"></p>
+        <div id="review-metrics" class="review-metrics" hidden></div>
+
+        <fieldset id="no-chord-controls" class="review-tool" disabled>
+          <legend>Replace a range with an intentional N.C.</legend>
+          <label for="no-chord-start">Start frame
+            <input id="no-chord-start" type="number" min="0" value="0">
+          </label>
+          <label for="no-chord-end">End frame
+            <input id="no-chord-end" type="number" min="1" value="1">
+          </label>
+          <button id="insert-no-chord" type="button">Apply N.C. range</button>
+        </fieldset>
+
+        <fieldset id="section-controls" class="review-tool" disabled>
+          <legend>Section markers</legend>
+          <label for="section-label">Label
+            <input id="section-label" type="text" maxlength="80" value="Verse">
+          </label>
+          <label for="section-frame">Frame
+            <input id="section-frame" type="number" min="0" value="0">
+          </label>
+          <button id="add-section" type="button">Add section</button>
+        </fieldset>
+
+        <ol id="section-list" class="section-list" aria-label="Review section markers"></ol>
+        <ol id="review-lane" class="review-lane"
+          aria-label="Editable reviewed chord timeline"></ol>
+      </section>
+
+      <section class="review-panel" aria-labelledby="promotion-title">
+        <div class="analysis-heading">
+          <div>
+            <p class="step">05 / Approve</p>
+            <h2 id="promotion-title">Guitar-aware SongChart</h2>
+          </div>
+          <span id="promotion-phase" class="review-badge">Waiting for review</span>
+        </div>
+        <p class="analysis-caveat">Approval pins this exact ready review revision.
+          Stage 4 uses an explicitly confirmed 4/4 integer-frame measure grid,
+          sounding chord symbols, Standard tuning, and built-in diagram references.
+          SongChart keeps chord order, but exact frame timing stays private.</p>
+        <fieldset id="promotion-controls" class="promotion-controls" disabled>
+          <legend>Chart and grid confirmation</legend>
+          <label for="promotion-title-input">Title
+            <input id="promotion-title-input" type="text" maxlength="256" required>
+          </label>
+          <label for="promotion-artist">Artist (optional)
+            <input id="promotion-artist" type="text" maxlength="256">
+          </label>
+          <label for="promotion-key">Key (optional; never copied automatically)
+            <input id="promotion-key" type="text" maxlength="32">
+          </label>
+          <label for="promotion-capo">Capo
+            <input id="promotion-capo" type="text" maxlength="32" value="None">
+          </label>
+          <label for="promotion-section">Leading section
+            <input id="promotion-section" type="text" maxlength="96" value="Song">
+          </label>
+          <label for="measure-boundaries">Confirmed measure boundaries (integer frames, comma-separated)
+            <input id="measure-boundaries" type="text" inputmode="numeric">
+          </label>
+          <button id="add-playhead-boundary" type="button">
+            Add current playhead as measure boundary
+          </button>
+          <label class="authorization">
+            <input id="confirm-meter" type="checkbox">
+            I confirm this full-coverage grid is constant 4/4, including pickup or trailing handling.
+          </label>
+          <label class="authorization">
+            <input id="confirm-guitar-setup" type="checkbox">
+            I confirm Standard six-string tuning and sounding (not capo-relative) symbols.
+          </label>
+          <div id="guitar-decisions" class="guitar-decisions"
+            aria-label="Per-chord guitar decisions"></div>
+          <button id="preview-promotion" class="primary" type="button">Build exact preview</button>
+        </fieldset>
+        <p id="promotion-status" class="status" role="status" aria-live="polite">
+          Finish review before creating a promotion draft.
+        </p>
+        <section id="promotion-preview" hidden aria-labelledby="promotion-preview-title">
+          <h3 id="promotion-preview-title">Validated preview and mapping issues</h3>
+          <ol id="promotion-issues" class="section-list"></ol>
+          <label for="promotion-preview-format">Exact renderer preview
+            <select id="promotion-preview-format">
+              <option value="markdown">Markdown with chord references</option>
+              <option value="text">Text with chord references</option>
+              <option value="json">Normalized JSON</option>
+            </select>
+          </label>
+          <pre id="promotion-chart" class="promotion-chart" tabindex="0"></pre>
+          <button id="approve-promotion" type="button" disabled>Approve exact preview</button>
+        </section>
+        <section id="promotion-approved" hidden aria-labelledby="promotion-approved-title">
+          <h3 id="promotion-approved-title">Approved exports</h3>
+          <p>Revocation blocks future exports but cannot retract files already written.</p>
+          <label for="promotion-export-format">Export preview
+            <select id="promotion-export-format">
+              <option value="markdown">Markdown</option>
+              <option value="text">Text</option>
+              <option value="json">JSON</option>
+            </select>
+          </label>
+          <pre id="promotion-export" class="promotion-chart" tabindex="0"></pre>
+          <label for="promotion-revoke-reason">Revocation reason
+            <select id="promotion-revoke-reason">
+              <option value="mistake">Mistake</option>
+              <option value="superseded">Superseded</option>
+              <option value="withdrawn">Withdrawn</option>
+            </select>
+          </label>
+          <button id="revoke-promotion" class="quiet" type="button">Revoke approval</button>
+        </section>
+      </section>
+
+      <section id="practice-panel" class="review-panel practice-panel"
+        aria-labelledby="practice-title">
+        <div class="analysis-heading">
+          <div>
+            <p class="step">06 / Practice</p>
+            <h2 id="practice-title">Approved chart practice</h2>
+          </div>
+          <span id="practice-phase" class="review-badge">Waiting for approval</span>
+        </div>
+        <p class="analysis-caveat">Practice uses the exact private approved
+          measure-to-frame map. Browser looping is interaction-synchronized,
+          not sample accurate. Speed uses ordinary browser playback-rate
+          control; Pitch preservation is not provided.</p>
+        <button id="practice-create" class="primary" type="button" disabled>
+          Prepare approved practice
+        </button>
+        <fieldset id="practice-controls" class="practice-controls" disabled>
+          <legend>Private saved setup</legend>
+          <label for="practice-target">Approved range
+            <select id="practice-target">
+              <option value="">No approved practice session</option>
+            </select>
+          </label>
+          <div id="practice-custom-range" class="practice-custom-range" hidden>
+            <label for="practice-custom-start">Custom start frame
+              <input id="practice-custom-start" type="number" min="0" value="0">
+            </label>
+            <label for="practice-custom-end">Custom end frame
+              <input id="practice-custom-end" type="number" min="1" value="1">
+            </label>
+          </div>
+          <label for="practice-speed">Playback speed
+            <select id="practice-speed">
+              <option value="500">50%</option>
+              <option value="750">75%</option>
+              <option value="900">90%</option>
+              <option value="1000" selected>100%</option>
+              <option value="1100">110%</option>
+              <option value="1250">125%</option>
+            </select>
+          </label>
+          <label for="practice-count-in">Count-in
+            <select id="practice-count-in">
+              <option value="off">Off</option>
+              <option value="one_approved_bar">One approved bar</option>
+            </select>
+          </label>
+          <label class="authorization">
+            <input id="practice-loop" type="checkbox" checked>
+            Repeat the selected half-open frame range
+          </label>
+          <div class="practice-actions">
+            <button id="practice-save" type="button">Save setup and position</button>
+            <button id="practice-start" class="primary" type="button">Start practice</button>
+            <button id="practice-pause" type="button">Pause and save</button>
+            <button id="practice-clear" class="quiet" type="button">Reset practice setup</button>
+          </div>
+        </fieldset>
+        <p id="practice-source-state" class="review-guidance">
+          Practice never stores a path, URL, media bytes, or playback capability.
+        </p>
+        <p id="practice-status" class="status" role="status" aria-live="polite"
+          tabindex="-1">Approve an exact chart or select a source with saved practice.</p>
+        <section class="practice-storage" aria-labelledby="practice-storage-title">
+          <h3 id="practice-storage-title">Private practice history</h3>
+          <p>Project-wide private records; excluded from SongChart and exports.</p>
+          <dl id="practice-storage-usage" class="practice-storage-usage">
+            <div>
+              <dt>Practice sessions</dt>
+              <dd id="practice-usage-sessions">Loading…</dd>
+            </div>
+            <div>
+              <dt>Current heads</dt>
+              <dd id="practice-usage-heads">Loading…</dd>
+            </div>
+            <div>
+              <dt>Immutable attempts</dt>
+              <dd id="practice-usage-attempts">Loading…</dd>
+            </div>
+            <div>
+              <dt>Saved-action receipts</dt>
+              <dd id="practice-usage-receipts">Loading…</dd>
+            </div>
+            <div>
+              <dt>Recovery artifacts</dt>
+              <dd id="practice-usage-recovery">Loading…</dd>
+            </div>
+            <div>
+              <dt>Exact record bytes</dt>
+              <dd id="practice-usage-bytes">Loading…</dd>
+            </div>
+          </dl>
+          <p class="review-guidance">Bytes describe validated practice records only.
+            They are not a storage quota, free-space estimate, or cleanup trigger.</p>
+          <p id="practice-storage-status" class="status" role="status"
+            aria-live="polite" tabindex="-1">Loading private practice usage…</p>
+          <div class="practice-danger">
+            <h4>Clear private history</h4>
+            <p>This affects the complete private practice-history domain only.
+              There is no per-session deletion or automatic pruning.</p>
+            <button id="practice-history-clear" class="danger" type="button" disabled>
+              Clear all practice history…
+            </button>
+          </div>
+        </section>
+      </section>
+    </section>
+  </main>
+
+  <dialog id="practice-history-dialog"
+    aria-labelledby="practice-history-dialog-title"
+    aria-describedby="practice-history-dialog-description">
+    <form id="practice-history-form" method="dialog">
+      <h2 id="practice-history-dialog-title">Clear all project practice history?</h2>
+      <p id="practice-history-dialog-description">This permanently deletes every
+        private practice session, saved setup and position, immutable practice
+        attempt, and saved-action retry receipt in this project. It cannot be
+        undone. Authorized audio, analyses, reviews, approvals, SongCharts, and
+        exported files are kept.</p>
+      <p id="practice-history-dialog-counts"></p>
+      <label for="practice-history-confirmation">
+        Type <strong>CLEAR ALL PRACTICE HISTORY</strong> to confirm
+        <input id="practice-history-confirmation" type="text"
+          autocomplete="off" spellcheck="false">
+      </label>
+      <p id="practice-history-dialog-status" class="status" role="status"
+        aria-live="polite"></p>
+      <div class="practice-actions">
+        <button id="practice-history-cancel" type="button">Cancel</button>
+        <button id="practice-history-submit" class="danger" type="submit" disabled>
+          Clear all practice history
+        </button>
+      </div>
+    </form>
+  </dialog>
+
+  <footer>
+    <p>Local service · no cloud upload · private project storage</p>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

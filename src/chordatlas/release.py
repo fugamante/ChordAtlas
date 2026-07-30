@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import compileall
 import os
-import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
 import zipfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TextIO
 
@@ -36,12 +37,21 @@ def run_release_check(root: Path | None = None, *, stderr: TextIO = sys.stderr) 
 
     for name, step in steps:
         print(f"[release-check] {name}", file=stderr)
-        if step() != 0:
+        try:
+            result = step()
+        except Exception as exc:
+            print(
+                f"[release-check] error: {name}: {type(exc).__name__}: {exc}",
+                file=stderr,
+            )
+            for note in getattr(exc, "__notes__", ()):
+                print(f"[release-check] note: {note}", file=stderr)
             print(f"[release-check] failed: {name}", file=stderr)
-            _cleanup_caches(source_root)
+            return 1
+        if result != 0:
+            print(f"[release-check] failed: {name}", file=stderr)
             return 1
 
-    _cleanup_caches(source_root)
     print("[release-check] passed", file=stderr)
     return 0
 
@@ -73,23 +83,37 @@ def _verify_snapshots(root: Path, stderr: TextIO) -> int:
 
 
 def _run_compileall(root: Path, stderr: TextIO) -> int:
-    ok = compileall.compile_dir(root / "src", quiet=1) and compileall.compile_dir(
-        root / "tests",
-        quiet=1,
-    )
-    _cleanup_caches(root)
-    if ok:
-        return 0
-    print("Python compilation failed under src/ or tests/.", file=stderr)
-    return 1
+    previous_prefix = sys.pycache_prefix
+    with _temporary_directory(prefix="chordatlas-compile-") as tmp:
+        try:
+            sys.pycache_prefix = tmp
+            ok = compileall.compile_dir(root / "src", quiet=1) and compileall.compile_dir(
+                root / "tests",
+                quiet=1,
+            )
+        finally:
+            sys.pycache_prefix = previous_prefix
+        if not ok:
+            print("Python compilation failed under src/ or tests/.", file=stderr)
+            return 1
+    return 0
 
 
 def _run_pytest(root: Path, stderr: TextIO) -> int:
-    return _run_command([sys.executable, "-m", "pytest"], cwd=root, stderr=stderr)
+    return _run_command(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider"],
+        cwd=root,
+        stderr=stderr,
+        env_overrides={
+            "PYTEST_ADDOPTS": "",
+            "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+            "PYTEST_PLUGINS": "",
+        },
+    )
 
 
 def _inspect_package_build(root: Path, stderr: TextIO) -> int:
-    with tempfile.TemporaryDirectory(prefix="chordatlas-release-") as tmp:
+    with _temporary_directory(prefix="chordatlas-release-") as tmp:
         out_dir = Path(tmp) / "dist"
         if (
             _run_command(
@@ -125,6 +149,29 @@ def _inspect_package_build(root: Path, stderr: TextIO) -> int:
     return 0
 
 
+@contextmanager
+def _temporary_directory(*, prefix: str) -> Iterator[str]:
+    temporary = tempfile.TemporaryDirectory(prefix=prefix)
+    active_error: BaseException | None = None
+    try:
+        yield temporary.name
+    except BaseException as error:
+        active_error = error
+        raise
+    finally:
+        try:
+            temporary.cleanup()
+        except OSError as cleanup_error:
+            message = (
+                "Temporary cleanup failed: temporary directory "
+                f"{temporary.name}: {cleanup_error}"
+            )
+            if active_error is not None:
+                active_error.add_note(message)
+            else:
+                raise OSError(message) from cleanup_error
+
+
 def _wheel_has_schemas(path: Path) -> bool:
     with zipfile.ZipFile(path) as wheel:
         names = set(wheel.namelist())
@@ -144,9 +191,18 @@ def _sdist_has_schemas(path: Path) -> bool:
     return True
 
 
-def _run_command(command: list[str], *, cwd: Path, stderr: TextIO) -> int:
+def _run_command(
+    command: list[str],
+    *,
+    cwd: Path,
+    stderr: TextIO,
+    env_overrides: dict[str, str] | None = None,
+) -> int:
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    if env_overrides:
+        env.update(env_overrides)
     result = subprocess.run(
         command,
         cwd=cwd,
@@ -162,11 +218,3 @@ def _run_command(command: list[str], *, cwd: Path, stderr: TextIO) -> int:
     if result.stderr:
         print(result.stderr, file=stderr)
     return result.returncode
-
-
-def _cleanup_caches(root: Path) -> None:
-    for base in (root / "src", root / "tests"):
-        if not base.exists():
-            continue
-        for cache in base.rglob("__pycache__"):
-            shutil.rmtree(cache, ignore_errors=True)

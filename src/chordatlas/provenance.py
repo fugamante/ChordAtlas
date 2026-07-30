@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -68,12 +69,18 @@ class EvidenceReference:
     notes: str | None = None
 
     def __post_init__(self) -> None:
+        if self.ref_id == "":
+            raise ValueError("EvidenceReference.ref_id must not be empty")
         _validate_timestamp_range(self.timestamp_range)
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any] | str) -> EvidenceReference:
         if isinstance(value, str):
             return cls(ref_id=value)
+        if not isinstance(value, Mapping):
+            raise ValueError("Evidence references must be strings or mappings")
+        if "ref_id" not in value:
+            raise ValueError("Evidence references must include a ref_id")
         return cls(
             ref_id=str(value["ref_id"]),
             source_name=_optional_str(value.get("source_name")),
@@ -120,9 +127,9 @@ class ProvenanceRecord:
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> ProvenanceRecord:
-        evidence_refs = tuple(
-            EvidenceReference.from_mapping(ref) for ref in value.get("evidence_refs", ())
-        )
+        if not isinstance(value, Mapping):
+            raise ValueError("Provenance records must be mappings")
+        evidence_refs = _parse_evidence_refs(value.get("evidence_refs", ()))
         return cls(
             source_type=_enum_value(SourceType, value.get("source_type"), SourceType.UNKNOWN),
             source_name=_optional_str(value.get("source_name")),
@@ -175,8 +182,10 @@ class ProvenanceMixin:
 def parse_provenance(value: Any) -> tuple[ProvenanceRecord, ...]:
     if value is None:
         return ()
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return (ProvenanceRecord.from_mapping(value),)
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise ValueError("Provenance must be a mapping or list of mappings")
     return tuple(ProvenanceRecord.from_mapping(item) for item in value)
 
 
@@ -207,6 +216,16 @@ def _confidence_value(value: Any) -> Confidence | None:
     if isinstance(value, Confidence):
         return value
     return _enum_value(Confidence, value, None)
+
+
+def _parse_evidence_refs(value: Any) -> tuple[EvidenceReference, ...]:
+    if value is None or value == "":
+        return ()
+    if isinstance(value, str):
+        return (EvidenceReference.from_mapping(value),)
+    if isinstance(value, (bytes, Mapping)) or not isinstance(value, Sequence):
+        raise ValueError("evidence_refs must be a string or list")
+    return tuple(EvidenceReference.from_mapping(ref) for ref in value)
 
 
 def _enum_value(enum_type: type[Enum], value: Any, default: Any) -> Any:

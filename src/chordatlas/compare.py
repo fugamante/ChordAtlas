@@ -4,7 +4,8 @@ import csv
 import io
 import json
 from collections import Counter
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from chordatlas.models import RecordingNote, RecordingNoteGroup, RecordingSource, SongChart
@@ -13,6 +14,7 @@ from chordatlas.provenance import ProvenanceRecord, provenance_to_mapping
 COMPARISON_SCHEMA_VERSION = "1.0.0"
 COMPARISON_METADATA_SCHEMA_VERSION = "1.0.0"
 ProvenanceMode = Literal["minimal", "standard", "research"]
+ClaimKey = tuple[str, str]
 CSV_COLUMNS = (
     "category",
     "category_label",
@@ -74,8 +76,17 @@ class SourceClaim:
     claim_origin: str | None = None
     provenance: tuple[ProvenanceRecord, ...] = ()
 
-    def key(self) -> str:
-        return f"{self.group}: {self.text}"
+    def key(self) -> ClaimKey:
+        return (self.group, self.text)
+
+    def semantic_key(self) -> tuple[str, str, str | None, str | None, str | None]:
+        return (
+            self.group,
+            self.text,
+            self.severity,
+            self.confidence,
+            self.claim_origin,
+        )
 
     def to_mapping(
         self,
@@ -154,7 +165,7 @@ def comparison_to_json(
     indent: int = 2,
 ) -> str:
     data = comparison_to_mapping(chart, filters=filters, provenance_mode=provenance_mode)
-    return json.dumps(data, indent=indent, sort_keys=True) + "\n"
+    return json.dumps(data, indent=indent, sort_keys=True, allow_nan=False) + "\n"
 
 
 def comparison_to_csv(
@@ -225,7 +236,7 @@ def comparison_metadata_to_json(
         filters=filters,
         provenance_mode=provenance_mode,
     )
-    return json.dumps(data, indent=indent, sort_keys=True) + "\n"
+    return json.dumps(data, indent=indent, sort_keys=True, allow_nan=False) + "\n"
 
 
 def render_comparison_markdown(
@@ -238,14 +249,20 @@ def render_comparison_markdown(
     title = data["chart_title"]
     if data["chart_artist"]:
         title = f"{title} — {data['chart_artist']}"
+    recording_labels = recording_display_labels(
+        (recording["id"], recording["title"]) for recording in data["recordings"]
+    )
+    category_labels = category_display_labels(
+        (category["category"], category["label"]) for category in data["categories"]
+    )
     lines = [f"# Recording Comparison: {title}", ""]
     lines.extend(summary_lines(data, markdown=True))
     for category in data["categories"]:
         lines.append("")
-        lines.append(f"## {category['label']}")
+        lines.append(f"## {category_labels[category['category']]}")
         for recording in category["recordings"]:
             lines.append("")
-            lines.append(f"### {recording['title']}")
+            lines.append(f"### {recording_labels[recording['id']]}")
             if recording["claims"]:
                 lines.extend(f"- {claim_label(claim)}" for claim in recording["claims"])
             else:
@@ -254,7 +271,7 @@ def render_comparison_markdown(
         lines.append("### Differences")
         if category["differences"]:
             for difference in category["differences"]:
-                lines.append(f"- {difference['title']}:")
+                lines.append(f"- {recording_labels[difference['recording_id']]}:")
                 lines.extend(f"  - {claim_label(claim)}" for claim in difference["claims"])
         else:
             lines.append("- No source-specific differences in scoped recording notes.")
@@ -271,14 +288,24 @@ def render_comparison_text(
     title = data["chart_title"]
     if data["chart_artist"]:
         title = f"{title} — {data['chart_artist']}"
+    recording_labels = recording_display_labels(
+        (recording["id"], recording["title"]) for recording in data["recordings"]
+    )
+    category_labels = category_display_labels(
+        (category["category"], category["label"]) for category in data["categories"]
+    )
     lines = [f"Recording Comparison: {title}", ""]
     lines.extend(summary_lines(data, markdown=False))
     for category in data["categories"]:
         lines.append("")
-        lines.append(category["label"].upper())
+        display_label = category_labels[category["category"]]
+        if display_label == category["label"]:
+            lines.append(display_label.upper())
+        else:
+            lines.append(f"{category['label'].upper()} [{category['category']}]")
         for recording in category["recordings"]:
             lines.append("")
-            lines.append(recording["title"])
+            lines.append(recording_labels[recording["id"]])
             if recording["claims"]:
                 lines.extend(f"- {claim_label(claim)}" for claim in recording["claims"])
             else:
@@ -287,7 +314,7 @@ def render_comparison_text(
         lines.append("Differences")
         if category["differences"]:
             for difference in category["differences"]:
-                lines.append(f"- {difference['title']}:")
+                lines.append(f"- {recording_labels[difference['recording_id']]}:")
                 lines.extend(f"  - {claim_label(claim)}" for claim in difference["claims"])
         else:
             lines.append("- No source-specific differences in scoped recording notes.")
@@ -311,9 +338,13 @@ def summary_lines(data: dict[str, Any], *, markdown: bool) -> list[str]:
         lines.append(f"- Severity: {counts_label(summary['severity_counts'])}")
     lines.append("")
     lines.append("By category:")
+    category_labels = category_display_labels(
+        (category["category"], category["label"])
+        for category in summary["categories"]
+    )
     for category in summary["categories"]:
         line = (
-            f"- {category['label']}: {category['claim_count']} claims, "
+            f"- {category_labels[category['category']]}: {category['claim_count']} claims, "
             f"{category['shared_count']} shared, "
             f"{category['source_specific_count']} source-specific"
         )
@@ -322,12 +353,38 @@ def summary_lines(data: dict[str, Any], *, markdown: bool) -> list[str]:
         lines.append(line)
     lines.append("")
     lines.append("By source:")
+    recording_labels = recording_display_labels(
+        (recording["id"], recording["title"])
+        for recording in summary["recordings"]
+    )
     for recording in summary["recordings"]:
         lines.append(
-            f"- {recording['title']}: {recording['claim_count']} claims, "
+            f"- {recording_labels[recording['id']]}: {recording['claim_count']} claims, "
             f"{recording['source_specific_count']} source-specific"
         )
     return lines
+
+
+def recording_display_labels(recordings: Iterable[tuple[str, str]]) -> dict[str, str]:
+    """Return human labels that qualify only colliding titles with stable IDs."""
+
+    rows = tuple(recordings)
+    title_counts = Counter(title for _, title in rows)
+    return {
+        recording_id: f"{title} [{recording_id}]" if title_counts[title] > 1 else title
+        for recording_id, title in rows
+    }
+
+
+def category_display_labels(categories: Iterable[tuple[str, str]]) -> dict[str, str]:
+    """Return human labels that qualify only colliding labels with raw category keys."""
+
+    rows = tuple(categories)
+    label_counts = Counter(label for _, label in rows)
+    return {
+        category: f"{label} [{category}]" if label_counts[label] > 1 else label
+        for category, label in rows
+    }
 
 
 def claim_label(claim: dict[str, Any]) -> str:
@@ -459,7 +516,7 @@ def _append_unique_mapping(
     seen: set[str],
     value: dict[str, Any],
 ) -> None:
-    key = json.dumps(value, sort_keys=True)
+    key = json.dumps(value, sort_keys=True, allow_nan=False)
     if key not in seen:
         values.append(value)
         seen.add(key)
@@ -489,7 +546,7 @@ def _category_mapping(
     recordings: tuple[RecordingSource, ...],
     filters: ComparisonFilters,
     *,
-    shared_keys: set[str],
+    shared_keys: set[ClaimKey],
     provenance_mode: ProvenanceMode,
 ) -> dict[str, Any]:
     recording_rows = []
@@ -601,7 +658,7 @@ def _claims_by_category(
     for group in chart.structured_recording_notes:
         for note in group.notes:
             _append_claim(claims_by_category, group, note, recording_ids, filters)
-        if group.value:
+        if group.value is not None:
             _append_claim(claims_by_category, group, group.value, recording_ids, filters)
     return {
         category: {recording_id: tuple(claims) for recording_id, claims in claims_by_id.items()}
@@ -656,18 +713,28 @@ def _severity_matches(severity: str | None, filters: ComparisonFilters) -> bool:
 
 
 def _append_unique(claims: list[SourceClaim], claim: SourceClaim) -> None:
-    if claim.key() not in {existing.key() for existing in claims}:
-        claims.append(claim)
+    unique_provenance = tuple(dict.fromkeys(claim.provenance))
+    if unique_provenance != claim.provenance:
+        claim = replace(claim, provenance=unique_provenance)
+    for index, existing in enumerate(claims):
+        if existing.key() != claim.key():
+            continue
+        if existing.semantic_key() == claim.semantic_key():
+            merged = tuple(dict.fromkeys(existing.provenance + claim.provenance))
+            if merged != existing.provenance:
+                claims[index] = replace(existing, provenance=merged)
+        return
+    claims.append(claim)
 
 
-def _shared_keys(claims_by_id: dict[str, tuple[SourceClaim, ...]]) -> set[str]:
+def _shared_keys(claims_by_id: dict[str, tuple[SourceClaim, ...]]) -> set[ClaimKey]:
     claim_sets = [set(claim.key() for claim in claims) for claims in claims_by_id.values()]
     return set.intersection(*claim_sets) if claim_sets else set()
 
 
 def _visible_shared_count(recording_rows: list[dict[str, Any]]) -> int:
     claim_sets = [
-        set(f"{claim['group']}: {claim['text']}" for claim in row["claims"])
+        set((claim["group"], claim["text"]) for claim in row["claims"])
         for row in recording_rows
     ]
     if not claim_sets:
